@@ -17,17 +17,18 @@ from common import (
     get_vocab_size,
     get_label_name,
 )
-from model import MidiClassifier
+from model import MidiClassifier, corn_logits_to_probs
 
 
 def load_model(
     model_dir: str | Path,
     max_seq_len: int = 1024,
-    d_model: int = 256,
+    d_model: int = 512,
     nhead: int = 8,
-    num_layers: int = 4,
-    dim_feedforward: int = 512,
+    num_layers: int = 8,
+    dim_feedforward: int = 2048,
     num_classes: int = 11,
+    loss_type: str = "corn",
 ) -> tuple[MidiClassifier, object, int]:
     """Load a saved model and its tokenizer.
 
@@ -54,6 +55,7 @@ def load_model(
         dim_feedforward=dim_feedforward,
         max_seq_len=max_seq_len,
         pad_token_id=pad_token_id,
+        loss_type=loss_type,
     )
 
     # Load weights — try safetensors first, then pytorch
@@ -123,7 +125,13 @@ def predict_grade(
         output = model(input_ids=input_ids, attention_mask=attention_mask)
 
     logits = output["logits"]
-    probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+
+    # Convert logits to per-class probabilities
+    if model.loss_type == "corn":
+        probs = corn_logits_to_probs(logits, model.num_classes).squeeze(0).cpu().numpy()
+    else:
+        probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+
     predicted_label = int(np.argmax(probs))
     confidence = float(probs[predicted_label])
 
@@ -153,10 +161,13 @@ def main():
                         help="Directory containing the trained model")
     parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--num_classes", type=int, default=11)
-    parser.add_argument("--d_model", type=int, default=256)
+    parser.add_argument("--d_model", type=int, default=512)
     parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=4)
-    parser.add_argument("--dim_feedforward", type=int, default=512)
+    parser.add_argument("--num_layers", type=int, default=8)
+    parser.add_argument("--dim_feedforward", type=int, default=2048)
+    parser.add_argument("--loss_type", type=str, default="corn",
+                        choices=["ce", "corn"],
+                        help="Loss type the model was trained with")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -170,6 +181,7 @@ def main():
         nhead=args.nhead,
         num_layers=args.num_layers,
         dim_feedforward=args.dim_feedforward,
+        loss_type=args.loss_type,
     )
 
     print(f"Predicting grade for: {args.midi_file}")

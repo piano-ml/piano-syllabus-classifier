@@ -42,7 +42,7 @@ python train_ps_classifier.py \
     --midi_dir mid \
     --labels_json data.json \
     --output_dir ./ps_model \
-    --epochs 6
+    --epochs 10
 ```
 
 All arguments with defaults:
@@ -51,14 +51,14 @@ All arguments with defaults:
 --midi_dir mid              # MIDI files directory
 --labels_json data.json     # Label JSON file
 --output_dir ./ps_model  # Output directory for model & plots
---epochs 6                  # Training epochs
+--epochs 10                 # Training epochs
 --batch_size 16             # Batch size
 --lr 3e-4                   # Learning rate
 --max_seq_len 1024          # Max token sequence length
---d_model 256               # Transformer embedding dimension
+--d_model 512               # Transformer embedding dimension
 --nhead 8                   # Attention heads
---num_layers 4              # Transformer encoder layers
---dim_feedforward 512       # FFN dimension
+--num_layers 8              # Transformer encoder layers
+--dim_feedforward 2048      # FFN dimension
 --dropout 0.1               # Dropout rate
 --seed 42                   # Random seed
 --pre_tokenize              # Pre-tokenize all files (faster, more RAM)

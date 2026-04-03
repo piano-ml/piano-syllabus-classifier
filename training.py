@@ -35,7 +35,7 @@ from checks import (
     plot_split_distribution,
     validate_data,
 )
-from model import MidiClassifier
+from model import MidiClassifier, corn_logits_to_class
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ class AccuracyProgressCallback(TrainerCallback):
 # ---------------------------------------------------------------------------
 
 
-def build_compute_metrics():
+def build_compute_metrics(loss_type: str = "ce"):
     """Return a compute_metrics function for the Trainer."""
     accuracy_metric = hf_evaluate.load("accuracy")
     f1_metric = hf_evaluate.load("f1")
@@ -145,7 +145,13 @@ def build_compute_metrics():
         logits, labels = eval_pred
         if isinstance(logits, tuple):
             logits = logits[0]
-        preds = np.argmax(logits, axis=-1)
+        if loss_type == "corn":
+            import torch as _torch
+            preds = corn_logits_to_class(
+                _torch.tensor(logits, dtype=_torch.float)
+            ).numpy()
+        else:
+            preds = np.argmax(logits, axis=-1)
         acc = accuracy_metric.compute(predictions=preds, references=labels)
         f1 = f1_metric.compute(
             predictions=preds, references=labels, average="macro"
@@ -268,17 +274,18 @@ def train(
     midi_dir: str,
     labels_json: str,
     output_dir: str,
-    epochs: int = 6,
+    epochs: int = 10,
     batch_size: int = 16,
     learning_rate: float = 3e-4,
     max_seq_len: int = 1024,
-    d_model: int = 256,
+    d_model: int = 512,
     nhead: int = 8,
-    num_layers: int = 4,
-    dim_feedforward: int = 512,
+    num_layers: int = 8,
+    dim_feedforward: int = 2048,
     dropout: float = 0.1,
     seed: int = 42,
     pre_tokenize: bool = False,
+    loss_type: str = "ce",
 ) -> tuple:
     """Full training pipeline. Returns (trainer, tokenizer, model, test info)."""
 
@@ -383,6 +390,7 @@ def train(
         max_seq_len=max_seq_len,
         pad_token_id=pad_token_id,
         class_weights=class_weights.to(device) if device == "cuda" else class_weights,
+        loss_type=loss_type,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -404,7 +412,8 @@ def train(
         per_device_eval_batch_size=batch_size * 2,
         learning_rate=learning_rate,
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.15,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -432,7 +441,7 @@ def train(
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collator,
-        compute_metrics=build_compute_metrics(),
+        compute_metrics=build_compute_metrics(loss_type),
         callbacks=[acc_callback],
     )
 
@@ -465,18 +474,21 @@ if __name__ == "__main__":
     parser.add_argument("--midi_dir", type=str, default="mid")
     parser.add_argument("--labels_json", type=str, default="data.json")
     parser.add_argument("--output_dir", type=str, default="./ps_model")
-    parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--d_model", type=int, default=256)
+    parser.add_argument("--d_model", type=int, default=512)
     parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=4)
-    parser.add_argument("--dim_feedforward", type=int, default=512)
+    parser.add_argument("--num_layers", type=int, default=8)
+    parser.add_argument("--dim_feedforward", type=int, default=2048)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pre_tokenize", action="store_true",
                         help="Pre-tokenize all files (faster training, more RAM)")
+    parser.add_argument("--loss_type", type=str, default="corn",
+                        choices=["ce", "corn"],
+                        help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
     args = parser.parse_args()
 
     trainer, tokenizer, model, test_info = train(
@@ -494,4 +506,5 @@ if __name__ == "__main__":
         dropout=args.dropout,
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
+        loss_type=args.loss_type,
     )

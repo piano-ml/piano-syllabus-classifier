@@ -33,7 +33,7 @@ from common import (
     make_label_func,
     get_label_name,
 )
-from model import MidiClassifier
+from model import MidiClassifier, corn_logits_to_class
 from training import ClassificationCollator, build_compute_metrics
 
 
@@ -160,6 +160,7 @@ def evaluate_on_test(
     test_labels: list[int],
     num_classes: int,
     output_dir: str | Path,
+    loss_type: str = "ce",
 ) -> dict:
     """Run evaluation on the test set and generate all reports and plots."""
     output_dir = Path(output_dir)
@@ -174,7 +175,13 @@ def evaluate_on_test(
     logits = predictions.predictions
     if isinstance(logits, tuple):
         logits = logits[0]
-    y_pred = np.argmax(logits, axis=-1).tolist()
+
+    if loss_type == "corn":
+        y_pred = corn_logits_to_class(
+            torch.tensor(logits, dtype=torch.float)
+        ).numpy().tolist()
+    else:
+        y_pred = np.argmax(logits, axis=-1).tolist()
     y_true = test_labels
 
     # Overall metrics
@@ -233,6 +240,7 @@ def evaluate_from_checkpoint(
     output_dir: str,
     max_seq_len: int = 1024,
     batch_size: int = 32,
+    loss_type: str = "corn",
 ) -> None:
     """Load a saved model and evaluate it on all matched MIDI files."""
     from miditok.pytorch_data import DatasetMIDI
@@ -263,6 +271,7 @@ def evaluate_from_checkpoint(
         num_classes=num_classes,
         pad_token_id=pad_token_id,
         max_seq_len=max_seq_len,
+        loss_type=loss_type,
     )
     best_model_dir = model_dir / "best_model"
     safetensors_path = best_model_dir / "model.safetensors"
@@ -301,10 +310,10 @@ def evaluate_from_checkpoint(
         model=model,
         args=training_args,
         data_collator=collator,
-        compute_metrics=build_compute_metrics(),
+        compute_metrics=build_compute_metrics(loss_type),
     )
 
-    evaluate_on_test(trainer, dataset, matched_labels, num_classes, output_dir)
+    evaluate_on_test(trainer, dataset, matched_labels, num_classes, output_dir, loss_type)
 
 
 if __name__ == "__main__":
@@ -318,6 +327,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./eval_results")
     parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--loss_type", type=str, default="corn",
+                        choices=["ce", "corn"],
+                        help="Loss type the model was trained with")
     args = parser.parse_args()
 
     evaluate_from_checkpoint(
@@ -327,4 +339,5 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
+        loss_type=args.loss_type,
     )

@@ -49,7 +49,7 @@ def parse_args():
     )
 
     # Training hyper-parameters
-    parser.add_argument("--epochs", type=int, default=6, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--max_seq_len", type=int, default=1024,
@@ -59,16 +59,19 @@ def parse_args():
                         help="Pre-tokenize all MIDI files (faster training, uses more RAM)")
 
     # Model architecture
-    parser.add_argument("--d_model", type=int, default=256,
+    parser.add_argument("--d_model", type=int, default=512,
                         help="Transformer embedding dimension")
     parser.add_argument("--nhead", type=int, default=8,
                         help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=4,
+    parser.add_argument("--num_layers", type=int, default=8,
                         help="Number of Transformer encoder layers")
-    parser.add_argument("--dim_feedforward", type=int, default=512,
+    parser.add_argument("--dim_feedforward", type=int, default=2048,
                         help="Feed-forward dimension in Transformer layers")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout rate")
+    parser.add_argument("--loss_type", type=str, default="corn",
+                        choices=["ce", "corn"],
+                        help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
 
     return parser.parse_args()
 
@@ -88,6 +91,7 @@ def main():
     print(f"  Max seq len:   {args.max_seq_len}")
     print(f"  Model:         d={args.d_model}, heads={args.nhead}, "
           f"layers={args.num_layers}, ff={args.dim_feedforward}")
+    print(f"  Loss type:     {args.loss_type}")
     print("=" * 60)
 
     # Run training
@@ -106,6 +110,7 @@ def main():
         dropout=args.dropout,
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
+        loss_type=args.loss_type,
     )
 
     # Unpack test info
@@ -119,6 +124,7 @@ def main():
         test_labels=test_labels,
         num_classes=num_classes,
         output_dir=args.output_dir,
+        loss_type=args.loss_type,
     )
 
     print("\n" + "=" * 60)
