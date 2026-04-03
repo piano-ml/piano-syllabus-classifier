@@ -2,6 +2,10 @@
 
 Transformer-based classifier that predicts the piano difficulty grade (Initial → Grade 10) from MIDI files, using [MidiTok](https://github.com/Natooz/MidiTok) REMI tokenization and a custom Transformer encoder trained with Hugging Face Trainer.
 
+## Credits
+
+Ramoneda, P., Lee, M., Jeong, D., Valero-Mas, J. J., & Serra, X. (2025). Piano Syllabus Dataset [Data set]. Zenodo. https://doi.org/10.5281/zenodo.14794592
+
 ## Requirements
 
 ### python deps
@@ -172,7 +176,5 @@ Performance is low for a practical ABRSM grade classifier, but reasonable as a f
 
 
 
-## Credits
 
-Ramoneda, P., Lee, M., Jeong, D., Valero-Mas, J. J., & Serra, X. (2025). Piano Syllabus Dataset [Data set]. Zenodo. https://doi.org/10.5281/zenodo.14794592
 
