@@ -73,6 +73,12 @@ def parse_args():
                         choices=["ce", "corn"],
                         help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
 
+    # Data augmentation
+    parser.add_argument("--augment_train", action="store_true",
+                        help="Enable on-the-fly pitch transposition for the training set")
+    parser.add_argument("--pitch_augment_range", type=int, default=2,
+                        help="Max semitones for transposition augmentation (uses -N to +N)")
+
     return parser.parse_args()
 
 
@@ -92,6 +98,10 @@ def main():
     print(f"  Model:         d={args.d_model}, heads={args.nhead}, "
           f"layers={args.num_layers}, ff={args.dim_feedforward}")
     print(f"  Loss type:     {args.loss_type}")
+    if args.augment_train:
+        print(f"  Augmentation:  ON (±{args.pitch_augment_range} semitones)")
+    else:
+        print(f"  Augmentation:  OFF")
     print("=" * 60)
 
     # Run training
@@ -111,6 +121,8 @@ def main():
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
         loss_type=args.loss_type,
+        augment_train=args.augment_train,
+        pitch_augment_range=args.pitch_augment_range,
     )
 
     # Unpack test info

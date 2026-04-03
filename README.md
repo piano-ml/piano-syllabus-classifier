@@ -30,6 +30,7 @@ Get mid.zip and unzip it to get a ./mid/ directory
 | `checks.py` | Data validation, class distribution analysis and plots |
 | `model.py` | `MidiClassifier` — Transformer encoder + classification head |
 | `training.py` | Dataset creation, collator, HF Trainer setup, training loop |
+| `augmentation.py` | On-the-fly pitch transposition augmentation (training set only) |
 | `evaluate_model.py` | Test-set evaluation, confusion matrix, per-class report |
 | `inference.py` | Predict grade for a new MIDI file |
 | `data.json` | Label file mapping piece keys → metadata with `ps` field |
@@ -62,7 +63,27 @@ All arguments with defaults:
 --dropout 0.1               # Dropout rate
 --seed 42                   # Random seed
 --pre_tokenize              # Pre-tokenize all files (faster, more RAM)
+--augment_train             # Enable on-the-fly pitch transposition (training set only)
+--pitch_augment_range 2     # Max semitones for transposition (default: 2 → uses -2 to +2)
 ```
+
+## Train with data augmentation
+
+On-the-fly pitch transposition (±2 semitones, training set only):
+
+```bash
+python train_ps_classifier.py \
+    --midi_dir mid \
+    --labels_json data.json \
+    --output_dir ./ps_model \
+    --epochs 10 \
+    --augment_train \
+    --pitch_augment_range 2
+```
+
+Each training sample is randomly transposed by one of {-2, -1, 0, +1, +2} semitones
+at each epoch. Validation and test sets remain unchanged. The ABRSM label is preserved
+(small transpositions do not affect difficulty). Incompatible with `--pre_tokenize`.
 
 ## Inference
 

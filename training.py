@@ -36,6 +36,7 @@ from checks import (
     validate_data,
 )
 from model import MidiClassifier, corn_logits_to_class
+from augmentation import AugmentedDatasetMIDI
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +287,8 @@ def train(
     seed: int = 42,
     pre_tokenize: bool = False,
     loss_type: str = "ce",
+    augment_train: bool = False,
+    pitch_augment_range: int = 2,
 ) -> tuple:
     """Full training pipeline. Returns (trainer, tokenizer, model, test info)."""
 
@@ -360,7 +363,22 @@ def train(
         pre_tokenize=pre_tokenize,
     )
 
-    train_dataset = DatasetMIDI(files_paths=train_files, **ds_kwargs)
+    # Training set: optionally use AugmentedDatasetMIDI for on-the-fly transposition
+    if augment_train and not pre_tokenize:
+        train_dataset = AugmentedDatasetMIDI(
+            files_paths=train_files,
+            pitch_augment_range=pitch_augment_range,
+            **ds_kwargs,
+        )
+        print(f"  Augmentation: ON (±{pitch_augment_range} semitones)")
+        print(f"  Training samples augmented on-the-fly: {len(train_dataset)}")
+    else:
+        train_dataset = DatasetMIDI(files_paths=train_files, **ds_kwargs)
+        if augment_train and pre_tokenize:
+            print("  WARNING: augmentation disabled (incompatible with --pre_tokenize)")
+        else:
+            print("  Augmentation: OFF")
+
     val_dataset = DatasetMIDI(files_paths=val_files, **ds_kwargs)
     test_dataset = DatasetMIDI(files_paths=test_files, **ds_kwargs)
 
@@ -489,6 +507,10 @@ if __name__ == "__main__":
     parser.add_argument("--loss_type", type=str, default="corn",
                         choices=["ce", "corn"],
                         help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
+    parser.add_argument("--augment_train", action="store_true",
+                        help="Enable on-the-fly pitch transposition for training set")
+    parser.add_argument("--pitch_augment_range", type=int, default=2,
+                        help="Max semitones for transposition augmentation (uses -N to +N)")
     args = parser.parse_args()
 
     trainer, tokenizer, model, test_info = train(
@@ -507,4 +529,6 @@ if __name__ == "__main__":
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
         loss_type=args.loss_type,
+        augment_train=args.augment_train,
+        pitch_augment_range=args.pitch_augment_range,
     )
