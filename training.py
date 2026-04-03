@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from miditok import REMI
 from miditok.pytorch_data import DatasetMIDI, DataCollator
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, TrainerCallback
 import evaluate as hf_evaluate
 import matplotlib
 matplotlib.use("Agg")
@@ -102,6 +102,33 @@ class ClassificationCollator:
         result["labels"] = torch.stack(stacked_labels)
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Epoch-level accuracy tracking callback
+# ---------------------------------------------------------------------------
+
+
+class AccuracyProgressCallback(TrainerCallback):
+    """Print and record validation accuracy after each evaluation."""
+
+    def __init__(self):
+        self.epoch_accuracies: list[tuple[int, float]] = []  # (epoch, accuracy)
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics is None:
+            return
+        acc = metrics.get("eval_accuracy")
+        epoch = int(state.epoch) if state.epoch else len(self.epoch_accuracies) + 1
+        if acc is not None:
+            self.epoch_accuracies.append((epoch, acc))
+            pct = acc * 100
+            print(f"  ► Epoch {epoch} — Validation accuracy: {pct:.2f}%")
+
+    def summary_str(self) -> str:
+        """Return a compact arrow-separated summary, e.g. '22% → 24.6% → …'."""
+        parts = [f"{acc * 100:.2f}%" for _, acc in self.epoch_accuracies]
+        return " → ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +235,14 @@ def plot_training_curves(trainer, output_dir: str | Path) -> None:
 
     # Accuracy
     if eval_acc:
-        axes[1].plot(eval_epochs, eval_acc, marker="o", color="green")
+        eval_acc_pct = [a * 100 for a in eval_acc]
+        axes[1].plot(eval_epochs, eval_acc_pct, marker="o", color="green")
+        for x, y in zip(eval_epochs, eval_acc_pct):
+            axes[1].annotate(f"{y:.2f}%", (x, y),
+                             textcoords="offset points", xytext=(0, 8),
+                             ha="center", fontsize=8)
         axes[1].set_xlabel("Epoch")
-        axes[1].set_ylabel("Accuracy")
+        axes[1].set_ylabel("Accuracy (%)")
         axes[1].set_title("Validation Accuracy")
 
     # F1
@@ -392,6 +424,8 @@ def train(
         max_seq_len=max_seq_len,
     )
 
+    acc_callback = AccuracyProgressCallback()
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -399,9 +433,15 @@ def train(
         eval_dataset=val_dataset,
         data_collator=collator,
         compute_metrics=build_compute_metrics(),
+        callbacks=[acc_callback],
     )
 
     trainer.train()
+
+    # Print accuracy progression summary
+    if acc_callback.epoch_accuracies:
+        summary = acc_callback.summary_str()
+        print(f"\n  Validation accuracy across epochs: {summary}")
 
     # Save best model
     trainer.save_model(Path(output_dir) / "best_model")
