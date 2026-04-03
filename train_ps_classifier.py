@@ -79,6 +79,12 @@ def parse_args():
     parser.add_argument("--pitch_augment_range", type=int, default=2,
                         help="Max semitones for transposition augmentation (uses -N to +N)")
 
+    # Memory / performance
+    parser.add_argument("--dataloader_num_workers", type=int, default=0,
+                        help="Number of DataLoader workers (0 = main process only, saves RAM)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Accumulate gradients over N steps (simulates larger batch size)")
+
     return parser.parse_args()
 
 
@@ -102,6 +108,8 @@ def main():
         print(f"  Augmentation:  ON (±{args.pitch_augment_range} semitones)")
     else:
         print(f"  Augmentation:  OFF")
+    print(f"  Num workers:   {args.dataloader_num_workers}")
+    print(f"  Grad accum:    {args.gradient_accumulation_steps}")
     print("=" * 60)
 
     # Run training
@@ -123,6 +131,8 @@ def main():
         loss_type=args.loss_type,
         augment_train=args.augment_train,
         pitch_augment_range=args.pitch_augment_range,
+        dataloader_num_workers=args.dataloader_num_workers,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
 
     # Unpack test info

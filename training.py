@@ -289,6 +289,8 @@ def train(
     loss_type: str = "ce",
     augment_train: bool = False,
     pitch_augment_range: int = 2,
+    dataloader_num_workers: int = 0,
+    gradient_accumulation_steps: int = 1,
 ) -> tuple:
     """Full training pipeline. Returns (trainer, tokenizer, model, test info)."""
 
@@ -440,7 +442,8 @@ def train(
         save_total_limit=2,
         logging_steps=50,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=4,
+        dataloader_num_workers=dataloader_num_workers,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         seed=seed,
         report_to="none",
         remove_unused_columns=False,  # Our model uses custom column names

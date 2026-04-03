@@ -51,7 +51,7 @@ All arguments with defaults:
 ```
 --midi_dir mid              # MIDI files directory
 --labels_json data.json     # Label JSON file
---output_dir ./ps_model  # Output directory for model & plots
+--output_dir ./ps_model     # Output directory for model & plots
 --epochs 10                 # Training epochs
 --batch_size 16             # Batch size
 --lr 3e-4                   # Learning rate
@@ -65,6 +65,8 @@ All arguments with defaults:
 --pre_tokenize              # Pre-tokenize all files (faster, more RAM)
 --augment_train             # Enable on-the-fly pitch transposition (training set only)
 --pitch_augment_range 2     # Max semitones for transposition (default: 2 → uses -2 to +2)
+--dataloader_num_workers 0  # DataLoader workers (0 saves RAM, 4 speeds up I/O)
+--gradient_accumulation_steps 1  # Accumulate gradients (use 4 with batch_size 4 to simulate 16)
 ```
 
 ## Train with data augmentation
@@ -84,6 +86,51 @@ python train_ps_classifier.py \
 Each training sample is randomly transposed by one of {-2, -1, 0, +1, +2} semitones
 at each epoch. Validation and test sets remain unchanged. The ABRSM label is preserved
 (small transpositions do not affect difficulty). Incompatible with `--pre_tokenize`.
+
+## Train on a low-memory system
+
+Reduce model size, batch size, and sequence length. Use gradient accumulation
+to compensate for the smaller batch:
+
+```bash
+python train_ps_classifier.py \
+    --midi_dir mid \
+    --labels_json data.json \
+    --output_dir ./ps_model \
+    --batch_size 4 \
+    --gradient_accumulation_steps 4 \
+    --d_model 256 \
+    --num_layers 4 \
+    --dim_feedforward 1024 \
+    --max_seq_len 512 \
+    --dataloader_num_workers 0
+```
+
+This gives an effective batch size of 16 (4 × 4) while using ~4× less memory.
+Key savings: smaller model (~4× fewer parameters), shorter sequences (~4× less
+attention memory), and no worker process duplication.
+
+## Train on a low-memory system with augmentation
+
+Combine the low-memory setup with on-the-fly ±2 semitone transposition:
+
+```bash
+python train_ps_classifier.py \
+    --midi_dir mid \
+    --labels_json data.json \
+    --output_dir ./ps_model \
+    --batch_size 4 \
+    --gradient_accumulation_steps 4 \
+    --d_model 256 \
+    --num_layers 4 \
+    --dim_feedforward 1024 \
+    --max_seq_len 512 \
+    --dataloader_num_workers 0 \
+    --augment_train
+```
+
+Each training sample is randomly transposed by {-2, -1, 0, +1, +2} semitones.
+`--pitch_augment_range 2` is the default, so it does not need to be specified.
 
 ## Inference
 
