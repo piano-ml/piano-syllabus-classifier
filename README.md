@@ -63,8 +63,7 @@ All arguments with defaults:
 --dropout 0.1               # Dropout rate
 --seed 42                   # Random seed
 --pre_tokenize              # Pre-tokenize all files (faster, more RAM)
---augment_train             # Enable on-the-fly pitch transposition (training set only)
---pitch_augment_range 2     # Max semitones for transposition (default: 2 → uses -2 to +2)
+--pitch_augment_range 2     # Max semitones for transposition (0 = disabled, default: 2 → uses ±2)
 --dataloader_num_workers 0  # DataLoader workers (0 saves RAM, 4 speeds up I/O)
 --gradient_accumulation_steps 1  # Accumulate gradients (use 4 with batch_size 4 to simulate 16)
 ```
@@ -79,7 +78,6 @@ python train_ps_classifier.py \
     --labels_json data.json \
     --output_dir ./ps_model \
     --epochs 10 \
-    --augment_train \
     --pitch_augment_range 2
 ```
 
@@ -125,12 +123,11 @@ python train_ps_classifier.py \
     --num_layers 4 \
     --dim_feedforward 1024 \
     --max_seq_len 512 \
-    --dataloader_num_workers 0 \
-    --augment_train
+    --dataloader_num_workers 0
 ```
 
 Each training sample is randomly transposed by {-2, -1, 0, +1, +2} semitones.
-`--pitch_augment_range 2` is the default, so it does not need to be specified.
+`--pitch_augment_range 2` is the default. Use `--pitch_augment_range 0` to disable augmentation.
 
 ## Inference
 
@@ -241,6 +238,7 @@ weighted avg      0.239     0.249     0.239      1186
 
 Performance is low for a practical ABRSM grade classifier, but reasonable as a first attempt with a small custom Transformer (~2.2M parameters, 4 layers). The model captures the ordinal structure (confusions cluster near the diagonal) and clearly separates extreme grades from each other.
 
+python train_ps_classifier.py     --midi_dir mid     --labels_json data.json     --output_dir ./ps_model     --epochs 20     --batch_size 16     --lr 1e-4     --max_seq_len 512     --d_model 256     --nhead 4     --num_layers 4     --dim_feedforward 1024     --dropout 0.2     --dataloader_num_workers 2     --pitch_augment_range 2
 
 
 

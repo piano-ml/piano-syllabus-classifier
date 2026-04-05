@@ -16,25 +16,22 @@ from common import (
     get_pad_token_id,
     get_vocab_size,
     get_label_name,
+    load_config,
 )
 from model import MidiClassifier, corn_logits_to_probs
 
 
 def load_model(
     model_dir: str | Path,
-    max_seq_len: int = 1024,
-    d_model: int = 512,
-    nhead: int = 8,
-    num_layers: int = 8,
-    dim_feedforward: int = 2048,
-    num_classes: int = 11,
-    loss_type: str = "corn",
-) -> tuple[MidiClassifier, object, int]:
-    """Load a saved model and its tokenizer.
+) -> tuple[MidiClassifier, object, int, dict]:
+    """Load a saved model, its tokenizer, and its config.
 
-    Returns (model, tokenizer, pad_token_id).
+    Returns (model, tokenizer, pad_token_id, config).
     """
     model_dir = Path(model_dir)
+
+    # Load config saved during training
+    cfg = load_config(model_dir)
 
     # Load tokenizer
     tokenizer = build_tokenizer()
@@ -45,17 +42,18 @@ def load_model(
     pad_token_id = get_pad_token_id(tokenizer)
     vocab_size = get_vocab_size(tokenizer)
 
-    # Build model with same architecture
+    # Build model with saved architecture
     model = MidiClassifier(
         vocab_size=vocab_size,
-        num_classes=num_classes,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
-        max_seq_len=max_seq_len,
+        num_classes=cfg["num_classes"],
+        d_model=cfg["d_model"],
+        nhead=cfg["nhead"],
+        num_layers=cfg["num_layers"],
+        dim_feedforward=cfg["dim_feedforward"],
+        dropout=cfg.get("dropout", 0.1),
+        max_seq_len=cfg["max_seq_len"],
         pad_token_id=pad_token_id,
-        loss_type=loss_type,
+        loss_type=cfg["loss_type"],
     )
 
     # Load weights — try safetensors first, then pytorch
@@ -78,7 +76,7 @@ def load_model(
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
-    return model, tokenizer, pad_token_id
+    return model, tokenizer, pad_token_id, cfg
 
 
 def predict_grade(
@@ -159,29 +157,13 @@ def main():
                         help="Path to the MIDI file")
     parser.add_argument("--model_dir", type=str, default="./ps_model",
                         help="Directory containing the trained model")
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--num_classes", type=int, default=11)
-    parser.add_argument("--d_model", type=int, default=512)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=8)
-    parser.add_argument("--dim_feedforward", type=int, default=2048)
-    parser.add_argument("--loss_type", type=str, default="corn",
-                        choices=["ce", "corn"],
-                        help="Loss type the model was trained with")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"Loading model from {args.model_dir}...")
-    model, tokenizer, pad_token_id = load_model(
+    model, tokenizer, pad_token_id, cfg = load_model(
         model_dir=args.model_dir,
-        max_seq_len=args.max_seq_len,
-        num_classes=args.num_classes,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.dim_feedforward,
-        loss_type=args.loss_type,
     )
 
     print(f"Predicting grade for: {args.midi_file}")
@@ -190,7 +172,7 @@ def main():
         model=model,
         tokenizer=tokenizer,
         pad_token_id=pad_token_id,
-        max_seq_len=args.max_seq_len,
+        max_seq_len=cfg["max_seq_len"],
         device=device,
     )
 

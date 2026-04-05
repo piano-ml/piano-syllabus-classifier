@@ -32,6 +32,7 @@ from common import (
     get_num_classes,
     make_label_func,
     get_label_name,
+    load_config,
 )
 from model import MidiClassifier, corn_logits_to_class
 from training import ClassificationCollator, build_compute_metrics
@@ -187,9 +188,11 @@ def evaluate_on_test(
     # Overall metrics
     acc = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="macro")
+    mae = float(np.mean(np.abs(np.array(y_true) - np.array(y_pred))))
 
     print(f"\n  Overall Accuracy: {acc:.4f}")
     print(f"  Macro F1 Score:  {f1:.4f}")
+    print(f"  MAE:             {mae:.4f}")
 
     # Classification report
     label_names = [get_label_name(c) for c in range(num_classes)]
@@ -202,7 +205,8 @@ def evaluate_on_test(
     report_path = output_dir / "test_report.txt"
     with open(report_path, "w") as f:
         f.write(f"Overall Accuracy: {acc:.4f}\n")
-        f.write(f"Macro F1 Score:  {f1:.4f}\n\n")
+        f.write(f"Macro F1 Score:  {f1:.4f}\n")
+        f.write(f"MAE:             {mae:.4f}\n\n")
         f.write(report)
     print(f"Saved test report → {report_path}")
 
@@ -225,7 +229,7 @@ def evaluate_on_test(
         output_path=output_dir / "prediction_distribution.png",
     )
 
-    return {"accuracy": acc, "f1_macro": f1}
+    return {"accuracy": acc, "f1_macro": f1, "mae": mae}
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +242,7 @@ def evaluate_from_checkpoint(
     midi_dir: str,
     labels_json: str,
     output_dir: str,
-    max_seq_len: int = 1024,
     batch_size: int = 32,
-    loss_type: str = "corn",
 ) -> None:
     """Load a saved model and evaluate it on all matched MIDI files."""
     from miditok.pytorch_data import DatasetMIDI
@@ -248,6 +250,11 @@ def evaluate_from_checkpoint(
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    # Load config saved during training
+    cfg = load_config(model_dir)
+    max_seq_len = cfg["max_seq_len"]
+    loss_type = cfg["loss_type"]
 
     # Load tokenizer
     tokenizer = build_tokenizer()
@@ -265,12 +272,17 @@ def evaluate_from_checkpoint(
 
     print(f"Evaluating {len(matched_files)} files with {num_classes} classes")
 
-    # Load model
+    # Load model with saved architecture
     model = MidiClassifier(
         vocab_size=vocab_size,
         num_classes=num_classes,
-        pad_token_id=pad_token_id,
+        d_model=cfg["d_model"],
+        nhead=cfg["nhead"],
+        num_layers=cfg["num_layers"],
+        dim_feedforward=cfg["dim_feedforward"],
+        dropout=cfg.get("dropout", 0.1),
         max_seq_len=max_seq_len,
+        pad_token_id=pad_token_id,
         loss_type=loss_type,
     )
     best_model_dir = model_dir / "best_model"
@@ -325,11 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--midi_dir", type=str, default="mid")
     parser.add_argument("--labels_json", type=str, default="data.json")
     parser.add_argument("--output_dir", type=str, default="./eval_results")
-    parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--loss_type", type=str, default="corn",
-                        choices=["ce", "corn"],
-                        help="Loss type the model was trained with")
     args = parser.parse_args()
 
     evaluate_from_checkpoint(
@@ -337,7 +345,5 @@ if __name__ == "__main__":
         midi_dir=args.midi_dir,
         labels_json=args.labels_json,
         output_dir=args.output_dir,
-        max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
-        loss_type=args.loss_type,
     )

@@ -1,0 +1,29 @@
+{
+  "d_model": 320,
+  "nhead": 8,
+  "num_layers": 4,
+  "dim_feedforward": 1024,
+  "dropout": 0.35,
+  "max_seq_len": 512,
+  "loss_type": "ce",
+  "num_classes": 9,
+  "vocab_size": 403,
+  "pad_token_id": 0,
+  "epochs": 3,
+  "batch_size": 64,
+  "learning_rate": 0.0002,
+  "seed": 42,
+  "augment_train": true,
+  "pitch_augment_range": 2,
+  "augment_prob": [
+    1,
+    0.4,
+    0.4,
+    0.2,
+    0.2,
+    0.2,
+    0,
+    0,
+    0
+  ]
+}

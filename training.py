@@ -28,6 +28,8 @@ from common import (
     make_label_func,
     compute_class_weights,
     get_label_name,
+    DEFAULT_HPARAMS,
+    save_config,
 )
 from checks import (
     print_class_distribution,
@@ -157,7 +159,8 @@ def build_compute_metrics(loss_type: str = "ce"):
         f1 = f1_metric.compute(
             predictions=preds, references=labels, average="macro"
         )
-        return {"accuracy": acc["accuracy"], "f1_macro": f1["f1"]}
+        mae = float(np.mean(np.abs(preds - labels)))
+        return {"accuracy": acc["accuracy"], "f1_macro": f1["f1"], "mae": mae}
 
     return compute_metrics
 
@@ -275,22 +278,22 @@ def train(
     midi_dir: str,
     labels_json: str,
     output_dir: str,
-    epochs: int = 10,
-    batch_size: int = 16,
-    learning_rate: float = 3e-4,
-    max_seq_len: int = 1024,
-    d_model: int = 512,
-    nhead: int = 8,
-    num_layers: int = 8,
-    dim_feedforward: int = 2048,
-    dropout: float = 0.1,
-    seed: int = 42,
+    epochs: int = DEFAULT_HPARAMS["epochs"],
+    batch_size: int = DEFAULT_HPARAMS["batch_size"],
+    learning_rate: float = DEFAULT_HPARAMS["lr"],
+    max_seq_len: int = DEFAULT_HPARAMS["max_seq_len"],
+    d_model: int = DEFAULT_HPARAMS["d_model"],
+    nhead: int = DEFAULT_HPARAMS["nhead"],
+    num_layers: int = DEFAULT_HPARAMS["num_layers"],
+    dim_feedforward: int = DEFAULT_HPARAMS["dim_feedforward"],
+    dropout: float = DEFAULT_HPARAMS["dropout"],
+    seed: int = DEFAULT_HPARAMS["seed"],
     pre_tokenize: bool = False,
-    loss_type: str = "ce",
-    augment_train: bool = False,
-    pitch_augment_range: int = 2,
-    dataloader_num_workers: int = 0,
-    gradient_accumulation_steps: int = 1,
+    loss_type: str = DEFAULT_HPARAMS["loss_type"],
+    pitch_augment_range: int = DEFAULT_HPARAMS["pitch_augment_range"],
+    augment_prob: float | list[float] = DEFAULT_HPARAMS["augment_prob"],
+    dataloader_num_workers: int = DEFAULT_HPARAMS["dataloader_num_workers"],
+    gradient_accumulation_steps: int = DEFAULT_HPARAMS["gradient_accumulation_steps"],
 ) -> tuple:
     """Full training pipeline. Returns (trainer, tokenizer, model, test info)."""
 
@@ -343,6 +346,27 @@ def train(
     tokenizer.save(tokenizer_path)
     print(f"  Tokenizer saved → {tokenizer_path}")
 
+    # Save config so inference/evaluation can reconstruct the model
+    save_config({
+        "d_model": d_model,
+        "nhead": nhead,
+        "num_layers": num_layers,
+        "dim_feedforward": dim_feedforward,
+        "dropout": dropout,
+        "max_seq_len": max_seq_len,
+        "loss_type": loss_type,
+        "num_classes": num_classes,
+        "vocab_size": vocab_size,
+        "pad_token_id": pad_token_id,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "seed": seed,
+        "augment_train": pitch_augment_range > 0,
+        "pitch_augment_range": pitch_augment_range,
+        "augment_prob": augment_prob,
+    }, output_dir)
+
     # ------------------------------------------------------------------
     # 4. Build label maps for each split
     # ------------------------------------------------------------------
@@ -366,17 +390,19 @@ def train(
     )
 
     # Training set: optionally use AugmentedDatasetMIDI for on-the-fly transposition
-    if augment_train and not pre_tokenize:
+    if pitch_augment_range > 0 and not pre_tokenize:
         train_dataset = AugmentedDatasetMIDI(
             files_paths=train_files,
             pitch_augment_range=pitch_augment_range,
+            augment_prob=augment_prob,
+            label_map=label_map_all,
             **ds_kwargs,
         )
-        print(f"  Augmentation: ON (±{pitch_augment_range} semitones)")
+        print(f"  Augmentation: ON (±{pitch_augment_range} semitones, prob={augment_prob})")
         print(f"  Training samples augmented on-the-fly: {len(train_dataset)}")
     else:
         train_dataset = DatasetMIDI(files_paths=train_files, **ds_kwargs)
-        if augment_train and pre_tokenize:
+        if pitch_augment_range > 0 and pre_tokenize:
             print("  WARNING: augmentation disabled (incompatible with --pre_tokenize)")
         else:
             print("  Augmentation: OFF")
@@ -491,30 +517,42 @@ def train(
 if __name__ == "__main__":
     import argparse
 
+    D = DEFAULT_HPARAMS
     parser = argparse.ArgumentParser(description="Train MIDI grade classifier")
     parser.add_argument("--midi_dir", type=str, default="mid")
     parser.add_argument("--labels_json", type=str, default="data.json")
     parser.add_argument("--output_dir", type=str, default="./ps_model")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--d_model", type=int, default=512)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=8)
-    parser.add_argument("--dim_feedforward", type=int, default=2048)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--epochs", type=int, default=D["epochs"])
+    parser.add_argument("--batch_size", type=int, default=D["batch_size"])
+    parser.add_argument("--lr", type=float, default=D["lr"])
+    parser.add_argument("--max_seq_len", type=int, default=D["max_seq_len"])
+    parser.add_argument("--d_model", type=int, default=D["d_model"])
+    parser.add_argument("--nhead", type=int, default=D["nhead"])
+    parser.add_argument("--num_layers", type=int, default=D["num_layers"])
+    parser.add_argument("--dim_feedforward", type=int, default=D["dim_feedforward"])
+    parser.add_argument("--dropout", type=float, default=D["dropout"])
+    parser.add_argument("--seed", type=int, default=D["seed"])
     parser.add_argument("--pre_tokenize", action="store_true",
                         help="Pre-tokenize all files (faster training, more RAM)")
-    parser.add_argument("--loss_type", type=str, default="corn",
+    parser.add_argument("--loss_type", type=str, default=D["loss_type"],
                         choices=["ce", "corn"],
                         help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
-    parser.add_argument("--augment_train", action="store_true",
-                        help="Enable on-the-fly pitch transposition for training set")
-    parser.add_argument("--pitch_augment_range", type=int, default=2,
-                        help="Max semitones for transposition augmentation (uses -N to +N)")
+    parser.add_argument("--pitch_augment_range", type=int, default=D["pitch_augment_range"],
+                        help="Max semitones for transposition augmentation (uses -N to +N, 0 = disabled)")
+    parser.add_argument("--augment_prob", type=str, default=None,
+                        help="Per-class augment probability as comma-separated floats "
+                             "(e.g. '0.4,0.4,0.4,0.4,0.4,0.4,0.4,0,0') or a single float")
     args = parser.parse_args()
+
+    # Parse augment_prob: single float or comma-separated list
+    if args.augment_prob is not None:
+        parts = args.augment_prob.split(",")
+        if len(parts) == 1:
+            augment_prob_parsed: float | list[float] = float(parts[0])
+        else:
+            augment_prob_parsed = [float(p) for p in parts]
+    else:
+        augment_prob_parsed = D["augment_prob"]
 
     trainer, tokenizer, model, test_info = train(
         midi_dir=args.midi_dir,
@@ -532,6 +570,6 @@ if __name__ == "__main__":
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
         loss_type=args.loss_type,
-        augment_train=args.augment_train,
         pitch_augment_range=args.pitch_augment_range,
+        augment_prob=augment_prob_parsed,
     )

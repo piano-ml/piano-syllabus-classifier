@@ -44,17 +44,31 @@ def _score_fits_piano_range(score: Score, pitch_offset: int) -> bool:
 
 
 class AugmentedDatasetMIDI(DatasetMIDI):
-    """DatasetMIDI with on-the-fly random pitch transposition.
+    """DatasetMIDI with probabilistic pitch-transposition augmentation.
 
-    For each __getitem__ call, a random offset is drawn from
-    {-pitch_augment_range, ..., 0, ..., +pitch_augment_range}
-    with equal probability. If the chosen transposition would push notes
-    outside the piano range [21, 108], the original (offset=0) is used.
+    Each sample has a per-class probability of being randomly transposed
+    by an offset in [-pitch_augment_range, +pitch_augment_range] (excluding 0).
+    *augment_prob* can be a single float (uniform for all classes) or a list
+    of floats indexed by class id.
+
+    *label_map* maps filename stems to integer class ids so the correct
+    probability can be looked up per sample.
+
+    The dataset length equals the number of files (no expansion).
+
+    If a transposition would push notes outside the piano range [21, 108],
+    the original (offset=0) is used as fallback.
 
     This subclass only works when pre_tokenize=False (on-the-fly mode).
     """
 
-    def __init__(self, pitch_augment_range: int = 2, **kwargs):
+    def __init__(
+        self,
+        pitch_augment_range: int = 2,
+        augment_prob: float | list[float] = 0.4,
+        label_map: dict[str, int] | None = None,
+        **kwargs,
+    ):
         if kwargs.get("pre_tokenize", False):
             raise ValueError(
                 "AugmentedDatasetMIDI requires pre_tokenize=False "
@@ -62,11 +76,18 @@ class AugmentedDatasetMIDI(DatasetMIDI):
             )
         super().__init__(**kwargs)
         self.pitch_augment_range = pitch_augment_range
-        # Build the set of possible offsets: [-N, ..., -1, 0, 1, ..., N]
-        self.pitch_offsets = list(range(-pitch_augment_range, pitch_augment_range + 1))
+        self.augment_prob = augment_prob
+        self.label_map = label_map or {}
+        # All non-zero offsets: [-N, ..., -1, 1, ..., N]
+        self.pitch_offsets = [
+            o for o in range(-pitch_augment_range, pitch_augment_range + 1) if o != 0
+        ]
+
+    def __len__(self) -> int:
+        return len(self.files_paths)
 
     def __getitem__(self, idx: int) -> dict[str, LongTensor]:
-        """Load a MIDI file, apply random transposition, tokenize, and return."""
+        """Load a MIDI file, maybe apply random transposition, tokenize, and return."""
         labels = None
 
         try:
@@ -77,11 +98,15 @@ class AugmentedDatasetMIDI(DatasetMIDI):
                 item[self.labels_key_name] = None
             return item
 
-        # --- Random transposition ---
-        offset = random.choice(self.pitch_offsets)
-        if offset != 0 and _score_fits_piano_range(score, offset):
-            score = transpose_score(score, offset)
-        # If offset would go out of range, fall back to original (offset=0)
+        # --- Probabilistic transposition (per-class probability) ---
+        prob = self.augment_prob
+        if isinstance(prob, list):
+            cls_id = self.label_map.get(self.files_paths[idx].stem)
+            prob = prob[cls_id] if cls_id is not None and cls_id < len(prob) else 0.0
+        if random.random() < prob and self.pitch_offsets:
+            offset = random.choice(self.pitch_offsets)
+            if _score_fits_piano_range(score, offset):
+                score = transpose_score(score, offset)
 
         # --- Tokenize the (possibly transposed) score ---
         tseq = self._tokenize_score(score)

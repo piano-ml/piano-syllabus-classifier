@@ -23,10 +23,11 @@ import os
 
 from training import train
 from evaluate_model import evaluate_on_test
-from common import get_num_classes
+from common import get_num_classes, DEFAULT_HPARAMS
 
 
 def parse_args():
+    D = DEFAULT_HPARAMS
     parser = argparse.ArgumentParser(
         description="Train a Piano Syllabus (ABRSM) grade classifier on MIDI files",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -49,40 +50,38 @@ def parse_args():
     )
 
     # Training hyper-parameters
-    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--max_seq_len", type=int, default=1024,
+    parser.add_argument("--epochs", type=int, default=D["epochs"], help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=D["batch_size"], help="Batch size")
+    parser.add_argument("--lr", type=float, default=D["lr"], help="Learning rate")
+    parser.add_argument("--max_seq_len", type=int, default=D["max_seq_len"],
                         help="Maximum token sequence length (longer pieces are truncated)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--seed", type=int, default=D["seed"], help="Random seed")
     parser.add_argument("--pre_tokenize", action="store_true",
                         help="Pre-tokenize all MIDI files (faster training, uses more RAM)")
 
     # Model architecture
-    parser.add_argument("--d_model", type=int, default=512,
+    parser.add_argument("--d_model", type=int, default=D["d_model"],
                         help="Transformer embedding dimension")
-    parser.add_argument("--nhead", type=int, default=8,
+    parser.add_argument("--nhead", type=int, default=D["nhead"],
                         help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=8,
+    parser.add_argument("--num_layers", type=int, default=D["num_layers"],
                         help="Number of Transformer encoder layers")
-    parser.add_argument("--dim_feedforward", type=int, default=2048,
+    parser.add_argument("--dim_feedforward", type=int, default=D["dim_feedforward"],
                         help="Feed-forward dimension in Transformer layers")
-    parser.add_argument("--dropout", type=float, default=0.1,
+    parser.add_argument("--dropout", type=float, default=D["dropout"],
                         help="Dropout rate")
-    parser.add_argument("--loss_type", type=str, default="corn",
+    parser.add_argument("--loss_type", type=str, default=D["loss_type"],
                         choices=["ce", "corn"],
                         help="Loss function: 'ce' (cross-entropy) or 'corn' (ordinal)")
 
     # Data augmentation
-    parser.add_argument("--augment_train", action="store_true",
-                        help="Enable on-the-fly pitch transposition for the training set")
-    parser.add_argument("--pitch_augment_range", type=int, default=2,
-                        help="Max semitones for transposition augmentation (uses -N to +N)")
+    parser.add_argument("--pitch_augment_range", type=int, default=D["pitch_augment_range"],
+                        help="Max semitones for transposition augmentation (uses -N to +N, 0 = disabled)")
 
     # Memory / performance
-    parser.add_argument("--dataloader_num_workers", type=int, default=0,
+    parser.add_argument("--dataloader_num_workers", type=int, default=D["dataloader_num_workers"],
                         help="Number of DataLoader workers (0 = main process only, saves RAM)")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=D["gradient_accumulation_steps"],
                         help="Accumulate gradients over N steps (simulates larger batch size)")
 
     return parser.parse_args()
@@ -104,7 +103,7 @@ def main():
     print(f"  Model:         d={args.d_model}, heads={args.nhead}, "
           f"layers={args.num_layers}, ff={args.dim_feedforward}")
     print(f"  Loss type:     {args.loss_type}")
-    if args.augment_train:
+    if args.pitch_augment_range > 0:
         print(f"  Augmentation:  ON (±{args.pitch_augment_range} semitones)")
     else:
         print(f"  Augmentation:  OFF")
@@ -129,7 +128,6 @@ def main():
         seed=args.seed,
         pre_tokenize=args.pre_tokenize,
         loss_type=args.loss_type,
-        augment_train=args.augment_train,
         pitch_augment_range=args.pitch_augment_range,
         dataloader_num_workers=args.dataloader_num_workers,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
