@@ -1,19 +1,19 @@
-Overall Accuracy: 0.2428
-Macro F1 Score:  0.1206
-MAE:             2.1998
+MAE (continuous): 0.8222
+Accuracy (rounded): 0.4401
+Macro F1 (rounded): 0.3606
 
               precision    recall  f1-score   support
 
-     Initial      0.000     0.000     0.000        33
-     Grade 1      0.131     0.322     0.186        87
-     Grade 2      0.000     0.000     0.000        88
-     Grade 3      0.000     0.000     0.000       119
-     Grade 4      0.162     0.250     0.197       120
-     Grade 5      0.000     0.000     0.000       133
-     Grade 6      0.116     0.409     0.181       127
-     Grade 7      0.000     0.000     0.000       129
-     Grade 8      0.536     0.509     0.522       350
+     Initial      0.333     0.030     0.056        33
+     Grade 1      0.500     0.437     0.466        87
+     Grade 2      0.394     0.443     0.417        88
+     Grade 3      0.314     0.319     0.317       119
+     Grade 4      0.276     0.308     0.291       120
+     Grade 5      0.321     0.331     0.326       133
+     Grade 6      0.298     0.354     0.324       127
+     Grade 7      0.270     0.388     0.318       129
+     Grade 8      0.821     0.657     0.730       350
 
-    accuracy                          0.243      1186
-   macro avg      0.105     0.166     0.121      1186
-weighted avg      0.197     0.243     0.207      1186
+    accuracy                          0.440      1186
+   macro avg      0.392     0.363     0.361      1186
+weighted avg      0.474     0.440     0.449      1186

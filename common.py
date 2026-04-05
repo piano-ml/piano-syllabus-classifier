@@ -15,81 +15,21 @@ from miditok import REMI, TokenizerConfig
 # Centralised default hyper-parameters (single source of truth)
 # ---------------------------------------------------------------------------
 
-#DEFAULT_HPARAMS = {
-#    # Model architecture
-#    "d_model": 128,
-#    "nhead": 8,
-#    "num_layers": 3,
-#    "dim_feedforward": 512,
-#    "dropout": 0.2,
-#    "max_seq_len": 1024,
-#    "loss_type": "corn",
-    # Training
-#    "lr": 3e-4,
-#    "batch_size": 16,
-#    "epochs": 10,
-#    "seed": 42,
-#    "weight_decay": 0.01,
-#    "warmup_ratio": 0.15,
-    # Augmentation
-#    "pitch_augment_range": 2,
-    # Performance
-#    "dataloader_num_workers": 0,
-#    "gradient_accumulation_steps": 1,
-#}
-
-
 DEFAULT_HPARAMS = {
-    # Model architecture
-    "d_model": 320,
-    "nhead": 8,
-    "num_layers": 4,
-    "dim_feedforward": 1024,
-    "dropout": 0.35,
-    "max_seq_len": 512, # 256 for real run
-    "loss_type": "ce",
+    # MLP architecture
+    "hidden_dim": 128,
+    "dropout": 0.3,
     # Training
-    "lr": 2e-4,
+    "lr": 1e-3,
     "batch_size": 64,
-    "epochs": 3, # find limit for read run
+    "epochs": 12,
     "seed": 42,
-    "weight_decay": 0.05,
-    "warmup_ratio": 0.25,
-    # Augmentation
-    "pitch_augment_range": 2,
-    # Per-class augment probability: [Initial, Gr1, Gr2, ..., Gr8]
-    # Use a single float for uniform prob across all classes.
-    "augment_prob": [1, 0.4, 0.4, 0.2, 0.2, 0.2, 0, 0, 0],
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.1,
     # Performance
     "dataloader_num_workers": 4,
     "gradient_accumulation_steps": 1,
 }
-
-# loss_type = ce
-# max_seq_len 512:  Validation accuracy across epochs: 26.33% → 26.92% → 29.54%
-# max_seq_len 256:  Validation accuracy across epochs: 28.10% → 29.11% → 27.59% (Overall Accuracy: 27.57/Macro F1 Score:16.84)
-# max_seq_len 128:  Validation accuracy across epochs: 26.24% → 21.69% → 25.15% (Overall Accuracy: 24.13/Macro F1 Score:13.66)
-# loss_type = corn
- # "max_seq_len":  Validation accuracy across epochs: 128 11.14% → 14.01% → 14.51% (Overall Accuracy: 12.73/Macro F1 Score:11.49)
-# loss_type =  ce
-# augmentation + max_seq_len 128:  Validation accuracy across epochs: 13.08% → 21.94% → 17.47% (Overall Accuracy: 20.07, Macro F1 Score:14,02)
-# augmentation + max_seq_len 256: Validation accuracy across epochs: 13.76% → 21.18% → 20.42%  (Overall Accuracy: 21.42  Macro F1 Score:  17.39=
-# loss_type =  ce , "augment_prob": 0.4,
-# 16.71% → 15.95% → 19.24%   Test Accuracy: 0.1897   Test Macro F1: 0.1379
-
-
-#            d_model nhead num_layers dim_feedforward
-# A (bigger)*  320     8       4        1024        29.37% → 24.98% → 22.78%   Overall Accuracy: 0.3061  Macro F1 Score:  0.1051
-# B (deeper)   256     8       5        1024(!!!)   20.93% → 19.49% → 23.71%  Overall Accuracy: 0.2260   Macro F1 Score:  0.1479
-# C (wider)    384     8       3        1024        29.54% → 22.11% → 23.63%  Overall Accuracy: 0.2892 Macro F1 Score:  0.1187
-
-# should eventually reach at least 40–50% accuracy and Macro F1 > 0.35 with a decent setup. 15% is still too low.
-
-
-
-
-
-# d_head=8 , loss_type = ce, max_seq_len 128 ,"augment_prob": 0.25,
 
 
 def save_config(config: dict, output_dir: str | Path) -> None:
