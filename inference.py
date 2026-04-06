@@ -126,9 +126,7 @@ def main():
     )
 
     print(f"\n{'=' * 50}")
-    print(f"File:       {result['file']}")
-    print(f"Raw value:  {result['predicted_value']:.3f}")
-    print(f"Predicted:  {result['predicted_grade']} (label={result['predicted_label']})")
+    print(f"{result}")
 
 
 if __name__ == "__main__":
