@@ -4,8 +4,8 @@ train_ps_classifier.py — Main entry point for the Piano Syllabus grade classif
 
 Orchestrates the full pipeline:
   1. Data validation and diagnostics
-  2. Tokenization with REMI (miditok)
-  3. Training a Transformer classifier (HF Trainer)
+  2. Feature extraction from MIDI files
+  3. Training a Feature-MLP classifier (HF Trainer)
   4. Evaluation on the held-out test set
   5. Plots and reports
 
@@ -23,10 +23,11 @@ import os
 
 from training import train
 from evaluate_model import evaluate_on_test
-from common import get_num_classes
+from common import get_num_classes, DEFAULT_HPARAMS
 
 
 def parse_args():
+    D = DEFAULT_HPARAMS
     parser = argparse.ArgumentParser(
         description="Train a Piano Syllabus (ABRSM) grade classifier on MIDI files",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -45,30 +46,21 @@ def parse_args():
     # Output
     parser.add_argument(
         "--output_dir", type=str, default="./ps_model",
-        help="Directory for checkpoints, tokenizer, plots, and reports",
+        help="Directory for checkpoints, plots, and reports",
     )
 
     # Training hyper-parameters
-    parser.add_argument("--epochs", type=int, default=6, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--max_seq_len", type=int, default=1024,
-                        help="Maximum token sequence length (longer pieces are truncated)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--pre_tokenize", action="store_true",
-                        help="Pre-tokenize all MIDI files (faster training, uses more RAM)")
+    parser.add_argument("--epochs", type=int, default=D["epochs"], help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=D["batch_size"], help="Batch size")
+    parser.add_argument("--lr", type=float, default=D["lr"], help="Learning rate")
+    parser.add_argument("--dropout", type=float, default=D["dropout"], help="Dropout rate")
+    parser.add_argument("--seed", type=int, default=D["seed"], help="Random seed")
 
-    # Model architecture
-    parser.add_argument("--d_model", type=int, default=256,
-                        help="Transformer embedding dimension")
-    parser.add_argument("--nhead", type=int, default=8,
-                        help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=4,
-                        help="Number of Transformer encoder layers")
-    parser.add_argument("--dim_feedforward", type=int, default=512,
-                        help="Feed-forward dimension in Transformer layers")
-    parser.add_argument("--dropout", type=float, default=0.1,
-                        help="Dropout rate")
+    # Memory / performance
+    parser.add_argument("--dataloader_num_workers", type=int, default=D["dataloader_num_workers"],
+                        help="Number of DataLoader workers (0 = main process only, saves RAM)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=D["gradient_accumulation_steps"],
+                        help="Accumulate gradients over N steps (simulates larger batch size)")
 
     return parser.parse_args()
 
@@ -85,46 +77,46 @@ def main():
     print(f"  Epochs:        {args.epochs}")
     print(f"  Batch size:    {args.batch_size}")
     print(f"  Learning rate: {args.lr}")
-    print(f"  Max seq len:   {args.max_seq_len}")
-    print(f"  Model:         d={args.d_model}, heads={args.nhead}, "
-          f"layers={args.num_layers}, ff={args.dim_feedforward}")
+    print(f"  Dropout:       {args.dropout}")
+    print(f"  Mode:          MLP + LightGBM ensemble (MAE loss)")
+    print(f"  Num workers:   {args.dataloader_num_workers}")
+    print(f"  Grad accum:    {args.gradient_accumulation_steps}")
     print("=" * 60)
 
     # Run training
-    trainer, tokenizer, model, test_info = train(
+    trainer, ensemble, test_info = train(
         midi_dir=args.midi_dir,
         labels_json=args.labels_json,
         output_dir=args.output_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
-        max_seq_len=args.max_seq_len,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.dim_feedforward,
         dropout=args.dropout,
         seed=args.seed,
-        pre_tokenize=args.pre_tokenize,
+        dataloader_num_workers=args.dataloader_num_workers,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
 
     # Unpack test info
-    test_dataset, test_files, test_labels = test_info
+    test_feats, test_files, test_labels = test_info
     num_classes = get_num_classes(test_labels)
 
     # Final evaluation on test set
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     results = evaluate_on_test(
-        trainer=trainer,
-        test_dataset=test_dataset,
+        ensemble=ensemble,
+        test_feats=test_feats,
         test_labels=test_labels,
         num_classes=num_classes,
         output_dir=args.output_dir,
+        device=device,
     )
 
     print("\n" + "=" * 60)
     print("  DONE")
     print(f"  Test Accuracy: {results['accuracy']:.4f}")
     print(f"  Test Macro F1: {results['f1_macro']:.4f}")
+    print(f"  Test MAE:      {results['mae']:.4f}")
     print(f"  All outputs saved in: {args.output_dir}")
     print("=" * 60)
 

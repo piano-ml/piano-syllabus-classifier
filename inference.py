@@ -12,48 +12,30 @@ import torch
 import numpy as np
 
 from common import (
-    build_tokenizer,
-    get_pad_token_id,
-    get_vocab_size,
     get_label_name,
+    load_config,
 )
-from model import MidiClassifier
+from model import FeatureMLPRegressor, EnsembleRegressor
+from features import extract_features, FeatureNormalizer, NUM_FEATURES
 
 
 def load_model(
     model_dir: str | Path,
-    max_seq_len: int = 1024,
-    d_model: int = 256,
-    nhead: int = 8,
-    num_layers: int = 4,
-    dim_feedforward: int = 512,
-    num_classes: int = 11,
-) -> tuple[MidiClassifier, object, int]:
-    """Load a saved model and its tokenizer.
+) -> tuple[EnsembleRegressor, FeatureNormalizer, dict]:
+    """Load the ensemble (MLP + LightGBM), feature normalizer, and config.
 
-    Returns (model, tokenizer, pad_token_id).
+    Returns (ensemble, normalizer, config).
     """
     model_dir = Path(model_dir)
 
-    # Load tokenizer
-    tokenizer = build_tokenizer()
-    tokenizer_path = model_dir / "tokenizer.json"
-    if tokenizer_path.exists():
-        tokenizer = type(tokenizer)(params=tokenizer_path)
+    # Load config saved during training
+    cfg = load_config(model_dir)
 
-    pad_token_id = get_pad_token_id(tokenizer)
-    vocab_size = get_vocab_size(tokenizer)
-
-    # Build model with same architecture
-    model = MidiClassifier(
-        vocab_size=vocab_size,
-        num_classes=num_classes,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
-        max_seq_len=max_seq_len,
-        pad_token_id=pad_token_id,
+    # Build MLP with saved architecture
+    mlp = FeatureMLPRegressor(
+        num_features=cfg.get("num_features", NUM_FEATURES),
+        hidden_dim=cfg.get("hidden_dim", 128),
+        dropout=cfg.get("dropout", 0.3),
     )
 
     # Load weights — try safetensors first, then pytorch
@@ -72,72 +54,49 @@ def load_model(
             f"Expected model.safetensors or pytorch_model.bin"
         )
 
-    # strict=False to skip training-only buffers like class_weights
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
+    mlp.load_state_dict(state_dict, strict=False)
+    mlp.eval()
 
-    return model, tokenizer, pad_token_id
+    # Load ensemble (MLP + LightGBM)
+    mlp_weight = cfg.get("mlp_weight", 0.5)
+    ensemble = EnsembleRegressor.load(model_dir, mlp, mlp_weight=mlp_weight)
+
+    # Load feature normalizer
+    normalizer = FeatureNormalizer.load(model_dir / "feature_normalizer.npz")
+
+    return ensemble, normalizer, cfg
 
 
 def predict_grade(
     midi_path: str | Path,
-    model: MidiClassifier,
-    tokenizer,
-    pad_token_id: int,
-    max_seq_len: int = 1024,
+    ensemble: EnsembleRegressor,
+    normalizer: FeatureNormalizer,
     device: str = "cpu",
 ) -> dict:
     """Predict the piano grade for a single MIDI file.
 
     Returns a dict with:
-        - predicted_label: int
-        - predicted_grade: str (human-readable)
-        - probabilities: dict {grade_name: probability}
-        - confidence: float (probability of the top prediction)
+        - predicted_value: float  (continuous ensemble output)
+        - predicted_label: int    (rounded & clamped to 0-8)
+        - predicted_grade: str    (human-readable)
     """
-    from symusic import Score
-
     midi_path = Path(midi_path)
     if not midi_path.exists():
         raise FileNotFoundError(f"MIDI file not found: {midi_path}")
 
-    # Load and tokenize
-    score = Score(midi_path)
-    tokseq = tokenizer.encode(score)
+    # Extract and normalise features
+    raw_feats = extract_features(midi_path)
+    feats = normalizer.transform(raw_feats.reshape(1, -1))
 
-    # Get token ids — encode() returns a list when one_token_stream is False
-    if isinstance(tokseq, list):
-        token_ids = tokseq[0].ids
-    else:
-        token_ids = tokseq.ids
-    if len(token_ids) > max_seq_len:
-        token_ids = token_ids[:max_seq_len]
-
-    # Convert to tensor
-    input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
-    attention_mask = torch.ones_like(input_ids)
-
-    # Forward pass
-    model = model.to(device)
-    with torch.no_grad():
-        output = model(input_ids=input_ids, attention_mask=attention_mask)
-
-    logits = output["logits"]
-    probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
-    predicted_label = int(np.argmax(probs))
-    confidence = float(probs[predicted_label])
-
-    # Build probability dict
-    prob_dict = {}
-    for i, p in enumerate(probs):
-        prob_dict[get_label_name(i)] = round(float(p), 4)
+    # Ensemble prediction
+    pred_value = float(ensemble.predict(feats, device=device)[0])
+    pred_label = int(np.clip(round(pred_value), 0, 8))
 
     return {
         "file": str(midi_path),
-        "predicted_label": predicted_label,
-        "predicted_grade": get_label_name(predicted_label),
-        "confidence": round(confidence, 4),
-        "probabilities": prob_dict,
+        "predicted_value": round(pred_value, 3),
+        "predicted_label": pred_label,
+        "predicted_grade": get_label_name(pred_label),
     }
 
 
@@ -151,45 +110,20 @@ def main():
                         help="Path to the MIDI file")
     parser.add_argument("--model_dir", type=str, default="./ps_model",
                         help="Directory containing the trained model")
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--num_classes", type=int, default=11)
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=4)
-    parser.add_argument("--dim_feedforward", type=int, default=512)
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    ensemble, normalizer, cfg = load_model(model_dir=args.model_dir)
 
-    print(f"Loading model from {args.model_dir}...")
-    model, tokenizer, pad_token_id = load_model(
-        model_dir=args.model_dir,
-        max_seq_len=args.max_seq_len,
-        num_classes=args.num_classes,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.dim_feedforward,
-    )
-
-    print(f"Predicting grade for: {args.midi_file}")
     result = predict_grade(
         midi_path=args.midi_file,
-        model=model,
-        tokenizer=tokenizer,
-        pad_token_id=pad_token_id,
-        max_seq_len=args.max_seq_len,
+        ensemble=ensemble,
+        normalizer=normalizer,
         device=device,
     )
 
-    print(f"\n{'=' * 50}")
-    print(f"File:       {result['file']}")
-    print(f"Predicted:  {result['predicted_grade']} (label={result['predicted_label']})")
-    print(f"Confidence: {result['confidence']:.2%}")
-    print(f"\nAll probabilities:")
-    for grade, prob in result["probabilities"].items():
-        bar = "█" * int(prob * 40)
-        print(f"  {grade:<12} {prob:>6.2%}  {bar}")
+    print(f"{result}")
 
 
 if __name__ == "__main__":

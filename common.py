@@ -12,8 +12,57 @@ from miditok import REMI, TokenizerConfig
 
 
 # ---------------------------------------------------------------------------
+# Centralised default hyper-parameters (single source of truth)
+# ---------------------------------------------------------------------------
+
+DEFAULT_HPARAMS = {
+    # MLP architecture
+    "hidden_dim": 128,
+    "dropout": 0.3,
+    # Training
+    "lr": 1e-3,
+    "batch_size": 64,
+    "epochs": 12,
+    "seed": 42,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.1,
+    # Performance
+    "dataloader_num_workers": 4,
+    "gradient_accumulation_steps": 1,
+}
+
+
+def save_config(config: dict, output_dir: str | Path) -> None:
+    """Save model/training config to config.json in output_dir."""
+    path = Path(output_dir) / "config.json"
+    # Convert non-serialisable values
+    serialisable = {}
+    for k, v in config.items():
+        if isinstance(v, Path):
+            serialisable[k] = str(v)
+        else:
+            serialisable[k] = v
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(serialisable, f, indent=2)
+    print(f"  Config saved → {path}")
+
+
+def load_config(model_dir: str | Path) -> dict:
+    """Load config.json from a model directory."""
+    path = Path(model_dir) / "config.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No config.json found in {model_dir}. "
+            f"Was the model trained with the current version?"
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
 # Label mapping: ps value → integer class id
-# Piano Syllabus levels: 0 (Initial), 1–8 (Grade 1–8), 9, 10 (Diploma+)
+# Piano Syllabus levels: 0 (Initial), 1–8 (Grade 1–8)
+# Grades 9 and 10 are merged into Grade 8 (unreliable distinction)
 # ---------------------------------------------------------------------------
 
 LABEL_NAMES = {
@@ -26,8 +75,6 @@ LABEL_NAMES = {
     6: "Grade 6",
     7: "Grade 7",
     8: "Grade 8",
-    9: "Grade 9",
-    10: "Grade 10",
 }
 
 
@@ -36,26 +83,34 @@ def parse_ps_label(ps_value: str) -> int:
 
     Handles numeric strings ("1", "7"), the word "Initial" (→ 0),
     and grade strings like "Grade 3" (→ 3).
+    Grades 9 and 10 are clamped to 8 (unreliable distinction at that level).
     """
     if ps_value is None:
         raise ValueError("ps value is None")
     ps_str = str(ps_value).strip()
 
+    label: int | None = None
+
     # Direct numeric
     if ps_str.isdigit():
-        return int(ps_str)
-
+        label = int(ps_str)
     # "Initial" → 0
-    if ps_str.lower() == "initial":
-        return 0
-
+    elif ps_str.lower() == "initial":
+        label = 0
     # "Grade X" → X
-    if ps_str.lower().startswith("grade"):
+    elif ps_str.lower().startswith("grade"):
         parts = ps_str.split()
         if len(parts) == 2 and parts[1].isdigit():
-            return int(parts[1])
+            label = int(parts[1])
 
-    raise ValueError(f"Cannot parse ps value: {ps_value!r}")
+    if label is None:
+        raise ValueError(f"Cannot parse ps value: {ps_value!r}")
+
+    # Merge grades 9 and 10 into grade 8
+    if label > 8:
+        label = 8
+
+    return label
 
 
 # ---------------------------------------------------------------------------

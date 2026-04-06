@@ -1,0 +1,8 @@
+{
+  "mlp_config": {
+    "num_features": 18,
+    "hidden_dim": 128,
+    "dropout": 0.3
+  },
+  "n_folds": 5
+}

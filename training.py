@@ -1,18 +1,16 @@
 """
-training.py — Training pipeline using miditok DatasetMIDI + Hugging Face Trainer.
+training.py — Training pipeline using handcrafted features + MLP classifier.
 """
 
 import os
 from pathlib import Path
 
+import math
+
 import numpy as np
 import torch
-import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
-from miditok import REMI
-from miditok.pytorch_data import DatasetMIDI, DataCollator
 from transformers import Trainer, TrainingArguments, TrainerCallback
-import evaluate as hf_evaluate
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -21,13 +19,10 @@ from common import (
     load_labels,
     discover_midi_files,
     match_files_to_labels,
-    build_tokenizer,
-    get_pad_token_id,
-    get_vocab_size,
     get_num_classes,
     make_label_func,
-    compute_class_weights,
-    get_label_name,
+    DEFAULT_HPARAMS,
+    save_config,
 )
 from checks import (
     print_class_distribution,
@@ -35,7 +30,14 @@ from checks import (
     plot_split_distribution,
     validate_data,
 )
-from model import MidiClassifier
+from model import FeatureMLPRegressor, EnsembleRegressor
+from augmentation import FeatureDatasetMIDI
+from features import (
+    extract_features_batch,
+    FeatureNormalizer,
+    NUM_FEATURES,
+    FEATURE_NAMES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -43,65 +45,32 @@ from model import MidiClassifier
 # ---------------------------------------------------------------------------
 
 
-class ClassificationCollator:
-    """Collate variable-length token sequences for classification.
+class FeaturesOnlyCollator:
+    """Collate feature vectors + labels for the MLP regressor.
 
-    Pads input_ids to the longest sequence in the batch, builds an
-    attention_mask (1 = real token, 0 = pad), and stacks scalar labels.
-    Also truncates sequences that exceed *max_seq_len*.
+    Ignores input_ids entirely — the model only needs features.
+    Labels are cast to float for regression (MAE loss).
     """
 
-    def __init__(self, pad_token_id: int, max_seq_len: int):
-        self.pad_token_id = pad_token_id
-        self.max_seq_len = max_seq_len
-
     def __call__(self, batch: list[dict]) -> dict[str, torch.Tensor]:
-        # Filter out corrupted samples (None input_ids)
-        batch = [b for b in batch if b.get("input_ids") is not None]
+        batch = [b for b in batch if b.get("features") is not None]
         if not batch:
-            raise ValueError("All samples in the batch were corrupted / empty.")
+            raise ValueError("All samples in the batch had no features.")
 
-        input_ids_list = []
-        labels_list = []
-        for b in batch:
-            ids = b["input_ids"]
-            # Truncate
-            if len(ids) > self.max_seq_len:
-                ids = ids[: self.max_seq_len]
-            input_ids_list.append(ids)
-            labels_list.append(b["labels"])
+        features_list = [b["features"] for b in batch]
+        labels_list = [b["labels"] for b in batch]
 
-        # Determine max length in this batch
-        max_len = max(len(ids) for ids in input_ids_list)
-
-        padded_ids = []
-        attention_masks = []
-        for ids in input_ids_list:
-            seq_len = len(ids)
-            pad_len = max_len - seq_len
-            padded = F.pad(ids, (0, pad_len), value=self.pad_token_id)
-            mask = torch.cat(
-                [torch.ones(seq_len, dtype=torch.long),
-                 torch.zeros(pad_len, dtype=torch.long)]
-            )
-            padded_ids.append(padded)
-            attention_masks.append(mask)
-
-        result = {
-            "input_ids": torch.stack(padded_ids),
-            "attention_mask": torch.stack(attention_masks),
-        }
-
-        # Stack labels — handle both scalar and 1-element tensors
         stacked_labels = []
         for lab in labels_list:
             if lab.dim() == 0:
                 stacked_labels.append(lab)
             else:
                 stacked_labels.append(lab.squeeze())
-        result["labels"] = torch.stack(stacked_labels)
 
-        return result
+        return {
+            "features": torch.stack(features_list),
+            "labels": torch.stack(stacked_labels).float(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -109,25 +78,25 @@ class ClassificationCollator:
 # ---------------------------------------------------------------------------
 
 
-class AccuracyProgressCallback(TrainerCallback):
-    """Print and record validation accuracy after each evaluation."""
+class EvalProgressCallback(TrainerCallback):
+    """Print and record validation MAE after each evaluation."""
 
     def __init__(self):
-        self.epoch_accuracies: list[tuple[int, float]] = []  # (epoch, accuracy)
+        self.epoch_maes: list[tuple[int, float]] = []  # (epoch, mae)
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if metrics is None:
             return
-        acc = metrics.get("eval_accuracy")
-        epoch = int(state.epoch) if state.epoch else len(self.epoch_accuracies) + 1
-        if acc is not None:
-            self.epoch_accuracies.append((epoch, acc))
-            pct = acc * 100
-            print(f"  ► Epoch {epoch} — Validation accuracy: {pct:.2f}%")
+        mae = metrics.get("eval_mae")
+        epoch = int(state.epoch) if state.epoch else len(self.epoch_maes) + 1
+        if mae is not None:
+            self.epoch_maes.append((epoch, mae))
+            acc = metrics.get("eval_accuracy", 0) * 100
+            print(f"  ► Epoch {epoch} — Val MAE: {mae:.3f}  Accuracy: {acc:.2f}%")
 
     def summary_str(self) -> str:
-        """Return a compact arrow-separated summary, e.g. '22% → 24.6% → …'."""
-        parts = [f"{acc * 100:.2f}%" for _, acc in self.epoch_accuracies]
+        """Return a compact arrow-separated summary of MAE."""
+        parts = [f"{mae:.3f}" for _, mae in self.epoch_maes]
         return " → ".join(parts)
 
 
@@ -137,20 +106,28 @@ class AccuracyProgressCallback(TrainerCallback):
 
 
 def build_compute_metrics():
-    """Return a compute_metrics function for the Trainer."""
-    accuracy_metric = hf_evaluate.load("accuracy")
-    f1_metric = hf_evaluate.load("f1")
+    """Return a compute_metrics function for regression.
+
+    Predictions are continuous; we round-and-clamp to [0, 8] for
+    accuracy / classification-style metrics.
+    """
 
     def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        if isinstance(logits, tuple):
-            logits = logits[0]
-        preds = np.argmax(logits, axis=-1)
-        acc = accuracy_metric.compute(predictions=preds, references=labels)
-        f1 = f1_metric.compute(
-            predictions=preds, references=labels, average="macro"
-        )
-        return {"accuracy": acc["accuracy"], "f1_macro": f1["f1"]}
+        preds_raw, labels = eval_pred
+        if isinstance(preds_raw, tuple):
+            preds_raw = preds_raw[0]
+        # Flatten in case of (B, 1)
+        preds_raw = preds_raw.squeeze()
+        labels = labels.squeeze()
+
+        mae = float(np.mean(np.abs(preds_raw - labels)))
+
+        # Round to nearest integer grade for accuracy / F1
+        preds_int = np.clip(np.round(preds_raw), 0, 8).astype(int)
+        labels_int = np.round(labels).astype(int)
+        accuracy = float(np.mean(preds_int == labels_int))
+
+        return {"mae": mae, "accuracy": accuracy}
 
     return compute_metrics
 
@@ -206,11 +183,11 @@ def stratified_split(
 
 
 def plot_training_curves(trainer, output_dir: str | Path) -> None:
-    """Plot training & validation loss / accuracy curves from the Trainer log."""
+    """Plot training & validation loss / accuracy / MAE curves from the Trainer log."""
     log_history = trainer.state.log_history
 
     train_loss, train_epochs = [], []
-    eval_loss, eval_acc, eval_f1, eval_epochs = [], [], [], []
+    eval_loss, eval_acc, eval_mae, eval_epochs = [], [], [], []
 
     for entry in log_history:
         if "loss" in entry and "eval_loss" not in entry:
@@ -219,7 +196,7 @@ def plot_training_curves(trainer, output_dir: str | Path) -> None:
         if "eval_loss" in entry:
             eval_loss.append(entry["eval_loss"])
             eval_acc.append(entry.get("eval_accuracy", 0))
-            eval_f1.append(entry.get("eval_f1_macro", 0))
+            eval_mae.append(entry.get("eval_mae", 0))
             eval_epochs.append(entry.get("epoch", 0))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -233,7 +210,7 @@ def plot_training_curves(trainer, output_dir: str | Path) -> None:
     axes[0].set_title("Loss Curves")
     axes[0].legend()
 
-    # Accuracy
+    # Accuracy (rounded predictions)
     if eval_acc:
         eval_acc_pct = [a * 100 for a in eval_acc]
         axes[1].plot(eval_epochs, eval_acc_pct, marker="o", color="green")
@@ -243,14 +220,18 @@ def plot_training_curves(trainer, output_dir: str | Path) -> None:
                              ha="center", fontsize=8)
         axes[1].set_xlabel("Epoch")
         axes[1].set_ylabel("Accuracy (%)")
-        axes[1].set_title("Validation Accuracy")
+        axes[1].set_title("Validation Accuracy (rounded)")
 
-    # F1
-    if eval_f1:
-        axes[2].plot(eval_epochs, eval_f1, marker="o", color="orange")
+    # MAE
+    if eval_mae:
+        axes[2].plot(eval_epochs, eval_mae, marker="o", color="orange")
+        for x, y in zip(eval_epochs, eval_mae):
+            axes[2].annotate(f"{y:.3f}", (x, y),
+                             textcoords="offset points", xytext=(0, 8),
+                             ha="center", fontsize=8)
         axes[2].set_xlabel("Epoch")
-        axes[2].set_ylabel("Macro F1")
-        axes[2].set_title("Validation Macro F1")
+        axes[2].set_ylabel("MAE")
+        axes[2].set_title("Validation MAE")
 
     plt.tight_layout()
     path = Path(output_dir) / "training_curves.png"
@@ -268,19 +249,15 @@ def train(
     midi_dir: str,
     labels_json: str,
     output_dir: str,
-    epochs: int = 6,
-    batch_size: int = 16,
-    learning_rate: float = 3e-4,
-    max_seq_len: int = 1024,
-    d_model: int = 256,
-    nhead: int = 8,
-    num_layers: int = 4,
-    dim_feedforward: int = 512,
-    dropout: float = 0.1,
-    seed: int = 42,
-    pre_tokenize: bool = False,
+    epochs: int = DEFAULT_HPARAMS["epochs"],
+    batch_size: int = DEFAULT_HPARAMS["batch_size"],
+    learning_rate: float = DEFAULT_HPARAMS["lr"],
+    dropout: float = DEFAULT_HPARAMS["dropout"],
+    seed: int = DEFAULT_HPARAMS["seed"],
+    dataloader_num_workers: int = DEFAULT_HPARAMS["dataloader_num_workers"],
+    gradient_accumulation_steps: int = DEFAULT_HPARAMS["gradient_accumulation_steps"],
 ) -> tuple:
-    """Full training pipeline. Returns (trainer, tokenizer, model, test info)."""
+    """Full training pipeline. Returns (trainer, model, test info)."""
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -315,74 +292,88 @@ def train(
     )
 
     # ------------------------------------------------------------------
-    # 3. Tokenizer
+    # 3. Extract handcrafted features
     # ------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("Step 3: Building REMI tokenizer")
+    print("Step 3: Extracting handcrafted features")
     print("=" * 60)
-    tokenizer = build_tokenizer()
-    pad_token_id = get_pad_token_id(tokenizer)
-    vocab_size = get_vocab_size(tokenizer)
-    print(f"  Vocab size: {vocab_size}")
-    print(f"  PAD token id: {pad_token_id}")
+    print(f"  Feature dimensions: {NUM_FEATURES}")
+    print(f"  Features: {', '.join(FEATURE_NAMES)}")
 
-    # Save tokenizer for later inference
-    tokenizer_path = Path(output_dir) / "tokenizer.json"
-    tokenizer.save(tokenizer_path)
-    print(f"  Tokenizer saved → {tokenizer_path}")
+    # Extract raw features for all files
+    train_feats_raw = extract_features_batch(train_files)
+    val_feats_raw = extract_features_batch(val_files)
+    test_feats_raw = extract_features_batch(test_files)
+
+    # Fit normalizer on training set only
+    normalizer = FeatureNormalizer().fit(train_feats_raw)
+    normalizer.save(Path(output_dir) / "feature_normalizer.npz")
+    print(f"  Feature normalizer saved → {Path(output_dir) / 'feature_normalizer.npz'}")
+
+    train_feats = normalizer.transform(train_feats_raw)
+    val_feats = normalizer.transform(val_feats_raw)
+    test_feats = normalizer.transform(test_feats_raw)
+
+    # Build path → tensor lookup
+    feature_vectors = {}
+    for paths, feats in [
+        (train_files, train_feats),
+        (val_files, val_feats),
+        (test_files, test_feats),
+    ]:
+        for p, f in zip(paths, feats):
+            feature_vectors[str(p)] = torch.tensor(f, dtype=torch.float32)
+
+    print(f"  Features extracted and normalised for {len(feature_vectors)} files")
 
     # ------------------------------------------------------------------
-    # 4. Build label maps for each split
+    # 4. Create datasets
     # ------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Step 4: Creating datasets")
+    print("=" * 60)
+
     label_map_all = {f.stem: lbl for f, lbl in zip(matched_files, matched_labels)}
     label_func = make_label_func(label_map_all)
 
-    # ------------------------------------------------------------------
-    # 5. Create DatasetMIDI instances
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("Step 4: Creating datasets" + (" (pre-tokenizing...)" if pre_tokenize else ""))
-    print("=" * 60)
+    from common import build_tokenizer, get_pad_token_id
+    tokenizer = build_tokenizer()
 
     ds_kwargs = dict(
         tokenizer=tokenizer,
-        max_seq_len=max_seq_len,
+        max_seq_len=512,
         bos_token_id=tokenizer["BOS_None"],
         eos_token_id=tokenizer["EOS_None"],
         func_to_get_labels=label_func,
-        pre_tokenize=pre_tokenize,
     )
 
-    train_dataset = DatasetMIDI(files_paths=train_files, **ds_kwargs)
-    val_dataset = DatasetMIDI(files_paths=val_files, **ds_kwargs)
-    test_dataset = DatasetMIDI(files_paths=test_files, **ds_kwargs)
+    train_dataset = FeatureDatasetMIDI(
+        files_paths=train_files, feature_vectors=feature_vectors, **ds_kwargs
+    )
+    val_dataset = FeatureDatasetMIDI(
+        files_paths=val_files, feature_vectors=feature_vectors, **ds_kwargs
+    )
+    test_dataset = FeatureDatasetMIDI(
+        files_paths=test_files, feature_vectors=feature_vectors, **ds_kwargs
+    )
 
     print(f"  Train dataset: {len(train_dataset)} samples")
     print(f"  Val dataset:   {len(val_dataset)} samples")
     print(f"  Test dataset:  {len(test_dataset)} samples")
 
     # ------------------------------------------------------------------
-    # 6. Build model
+    # 5. Build model
     # ------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("Step 5: Building Transformer classifier")
+    print("Step 5: Building Feature-MLP regressor")
     print("=" * 60)
 
-    class_weights = compute_class_weights(train_labels, num_classes)
-    print(f"  Class weights: {class_weights.tolist()}")
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = MidiClassifier(
-        vocab_size=vocab_size,
-        num_classes=num_classes,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
+
+    model = FeatureMLPRegressor(
+        num_features=NUM_FEATURES,
+        hidden_dim=128,
         dropout=dropout,
-        max_seq_len=max_seq_len,
-        pad_token_id=pad_token_id,
-        class_weights=class_weights.to(device) if device == "cuda" else class_weights,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -404,27 +395,34 @@ def train(
         per_device_eval_batch_size=batch_size * 2,
         learning_rate=learning_rate,
         weight_decay=0.01,
-        warmup_ratio=0.1,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
-        metric_for_best_model="accuracy",
-        greater_is_better=True,
+        metric_for_best_model="mae",
+        greater_is_better=False,
         save_total_limit=2,
         logging_steps=50,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=4,
+        dataloader_num_workers=dataloader_num_workers,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         seed=seed,
         report_to="none",
         remove_unused_columns=False,  # Our model uses custom column names
     )
 
-    collator = ClassificationCollator(
-        pad_token_id=pad_token_id,
-        max_seq_len=max_seq_len,
+    # Custom optimizer + CosineAnnealingLR scheduler
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=learning_rate, weight_decay=0.01,
+    )
+    steps_per_epoch = math.ceil(len(train_dataset) / batch_size / gradient_accumulation_steps)
+    total_steps = steps_per_epoch * epochs
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, eta_min=1e-6,
     )
 
-    acc_callback = AccuracyProgressCallback()
+    collator = FeaturesOnlyCollator()
+
+    acc_callback = EvalProgressCallback()
 
     trainer = Trainer(
         model=model,
@@ -434,14 +432,15 @@ def train(
         data_collator=collator,
         compute_metrics=build_compute_metrics(),
         callbacks=[acc_callback],
+        optimizers=(optimizer, scheduler),
     )
 
     trainer.train()
 
-    # Print accuracy progression summary
-    if acc_callback.epoch_accuracies:
+    # Print MAE progression summary
+    if acc_callback.epoch_maes:
         summary = acc_callback.summary_str()
-        print(f"\n  Validation accuracy across epochs: {summary}")
+        print(f"\n  Validation MAE across epochs: {summary}")
 
     # Save best model
     trainer.save_model(Path(output_dir) / "best_model")
@@ -450,7 +449,92 @@ def train(
     # Plot training curves
     plot_training_curves(trainer, output_dir)
 
-    return trainer, tokenizer, model, (test_dataset, test_files, test_labels)
+    # ------------------------------------------------------------------
+    # 7. Train LightGBM regressor
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Step 7: Training LightGBM regressor")
+    print("=" * 60)
+    import lightgbm as lgb
+
+    lgbm_train = lgb.Dataset(train_feats, label=np.array(train_labels, dtype=np.float32))
+    lgbm_val = lgb.Dataset(val_feats, label=np.array(val_labels, dtype=np.float32), reference=lgbm_train)
+
+    lgbm_params = {
+        "objective": "mae",
+        "metric": "mae",
+        "verbosity": -1,
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "seed": seed,
+    }
+
+    lgbm_callbacks = [
+        lgb.log_evaluation(period=50),
+        lgb.early_stopping(stopping_rounds=50),
+    ]
+
+    lgbm_model = lgb.train(
+        lgbm_params,
+        lgbm_train,
+        num_boost_round=500,
+        valid_sets=[lgbm_val],
+        valid_names=["val"],
+        callbacks=lgbm_callbacks,
+    )
+
+    lgbm_val_pred = lgbm_model.predict(val_feats)
+    lgbm_val_mae = float(np.mean(np.abs(lgbm_val_pred - np.array(val_labels))))
+    print(f"  LightGBM validation MAE: {lgbm_val_mae:.3f}")
+
+    # ------------------------------------------------------------------
+    # 8. Build ensemble
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Step 8: Building MLP + LightGBM ensemble")
+    print("=" * 60)
+
+    # Find optimal weight on validation set
+    best_w, best_mae = 0.5, float("inf")
+    mlp_model = trainer.model
+    mlp_model.eval()
+    device_eval = next(mlp_model.parameters()).device
+    with torch.no_grad():
+        val_feat_t = torch.tensor(val_feats, dtype=torch.float32, device=device_eval)
+        mlp_val_pred = mlp_model(features=val_feat_t)["logits"].cpu().numpy()
+    for w in np.arange(0.1, 0.95, 0.05):
+        ens_pred = w * mlp_val_pred + (1 - w) * lgbm_val_pred
+        ens_mae = float(np.mean(np.abs(ens_pred - np.array(val_labels))))
+        if ens_mae < best_mae:
+            best_mae = ens_mae
+            best_w = round(float(w), 2)
+
+    print(f"  Optimal MLP weight: {best_w}")
+    print(f"  Ensemble validation MAE: {best_mae:.3f}")
+    print(f"  (MLP alone: {float(np.mean(np.abs(mlp_val_pred - np.array(val_labels)))):.3f}, "
+          f"LGBM alone: {lgbm_val_mae:.3f})")
+
+    ensemble = EnsembleRegressor(mlp_model, lgbm_model, mlp_weight=best_w)
+    ensemble.save(output_dir)
+
+    # Save ensemble weight in config
+    save_config({
+        "dropout": dropout,
+        "num_classes": num_classes,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "seed": seed,
+        "num_features": NUM_FEATURES,
+        "hidden_dim": 128,
+        "mode": "ensemble",
+        "mlp_weight": best_w,
+    }, output_dir)
+
+    return trainer, ensemble, (test_feats, test_files, test_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -461,37 +545,25 @@ def train(
 if __name__ == "__main__":
     import argparse
 
+    D = DEFAULT_HPARAMS
     parser = argparse.ArgumentParser(description="Train MIDI grade classifier")
     parser.add_argument("--midi_dir", type=str, default="mid")
     parser.add_argument("--labels_json", type=str, default="data.json")
     parser.add_argument("--output_dir", type=str, default="./ps_model")
-    parser.add_argument("--epochs", type=int, default=6)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=4)
-    parser.add_argument("--dim_feedforward", type=int, default=512)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pre_tokenize", action="store_true",
-                        help="Pre-tokenize all files (faster training, more RAM)")
+    parser.add_argument("--epochs", type=int, default=D["epochs"])
+    parser.add_argument("--batch_size", type=int, default=D["batch_size"])
+    parser.add_argument("--lr", type=float, default=D["lr"])
+    parser.add_argument("--dropout", type=float, default=D["dropout"])
+    parser.add_argument("--seed", type=int, default=D["seed"])
     args = parser.parse_args()
 
-    trainer, tokenizer, model, test_info = train(
+    trainer, model, test_info = train(
         midi_dir=args.midi_dir,
         labels_json=args.labels_json,
         output_dir=args.output_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
-        max_seq_len=args.max_seq_len,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.dim_feedforward,
         dropout=args.dropout,
         seed=args.seed,
-        pre_tokenize=args.pre_tokenize,
     )

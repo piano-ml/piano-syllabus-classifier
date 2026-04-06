@@ -1,0 +1,12 @@
+{
+  "dropout": 0.3,
+  "num_classes": 9,
+  "epochs": 12,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "seed": 42,
+  "num_features": 18,
+  "hidden_dim": 128,
+  "mode": "ensemble",
+  "mlp_weight": 0.1
+}

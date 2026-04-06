@@ -20,21 +20,16 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
 )
-from transformers import Trainer, TrainingArguments
 
 from common import (
     load_labels,
     discover_midi_files,
     match_files_to_labels,
-    build_tokenizer,
-    get_pad_token_id,
-    get_vocab_size,
     get_num_classes,
-    make_label_func,
     get_label_name,
+    load_config,
 )
-from model import MidiClassifier
-from training import ClassificationCollator, build_compute_metrics
+from model import FeatureMLPRegressor, EnsembleRegressor
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +150,12 @@ def plot_prediction_distribution(
 
 
 def evaluate_on_test(
-    trainer: Trainer,
-    test_dataset,
+    ensemble: EnsembleRegressor,
+    test_feats: np.ndarray,
     test_labels: list[int],
     num_classes: int,
     output_dir: str | Path,
+    device: str = "cpu",
 ) -> dict:
     """Run evaluation on the test set and generate all reports and plots."""
     output_dir = Path(output_dir)
@@ -169,33 +165,36 @@ def evaluate_on_test(
     print("Test Set Evaluation")
     print("=" * 60)
 
-    # Get predictions
-    predictions = trainer.predict(test_dataset)
-    logits = predictions.predictions
-    if isinstance(logits, tuple):
-        logits = logits[0]
-    y_pred = np.argmax(logits, axis=-1).tolist()
+    # Get ensemble predictions
+    preds_raw = ensemble.predict(test_feats, device=device)
+
+    # Continuous MAE
     y_true = test_labels
+    mae = float(np.mean(np.abs(preds_raw - np.array(y_true))))
 
-    # Overall metrics
+    # Round to nearest integer grade for classification metrics
+    y_pred = np.clip(np.round(preds_raw), 0, num_classes - 1).astype(int).tolist()
+
     acc = accuracy_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred, average="macro")
+    f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
 
-    print(f"\n  Overall Accuracy: {acc:.4f}")
-    print(f"  Macro F1 Score:  {f1:.4f}")
+    print(f"\n  MAE (continuous): {mae:.4f}")
+    print(f"  Accuracy (rounded): {acc:.4f}")
+    print(f"  Macro F1 (rounded): {f1:.4f}")
 
-    # Classification report
+    # Classification report (on rounded predictions)
     label_names = [get_label_name(c) for c in range(num_classes)]
     report = classification_report(
         y_true, y_pred, target_names=label_names, digits=3, zero_division=0,
     )
-    print(f"\nClassification Report:\n{report}")
+    print(f"\nClassification Report (rounded predictions):\n{report}")
 
     # Save report to file
     report_path = output_dir / "test_report.txt"
     with open(report_path, "w") as f:
-        f.write(f"Overall Accuracy: {acc:.4f}\n")
-        f.write(f"Macro F1 Score:  {f1:.4f}\n\n")
+        f.write(f"MAE (continuous): {mae:.4f}\n")
+        f.write(f"Accuracy (rounded): {acc:.4f}\n")
+        f.write(f"Macro F1 (rounded): {f1:.4f}\n\n")
         f.write(report)
     print(f"Saved test report → {report_path}")
 
@@ -218,7 +217,7 @@ def evaluate_on_test(
         output_path=output_dir / "prediction_distribution.png",
     )
 
-    return {"accuracy": acc, "f1_macro": f1}
+    return {"accuracy": acc, "f1_macro": f1, "mae": mae}
 
 
 # ---------------------------------------------------------------------------
@@ -231,23 +230,17 @@ def evaluate_from_checkpoint(
     midi_dir: str,
     labels_json: str,
     output_dir: str,
-    max_seq_len: int = 1024,
     batch_size: int = 32,
 ) -> None:
-    """Load a saved model and evaluate it on all matched MIDI files."""
-    from miditok.pytorch_data import DatasetMIDI
+    """Load a saved ensemble and evaluate it on all matched MIDI files."""
+    from features import extract_features_batch, FeatureNormalizer, NUM_FEATURES
 
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load tokenizer
-    tokenizer = build_tokenizer()
-    tokenizer_path = model_dir / "tokenizer.json"
-    if tokenizer_path.exists():
-        tokenizer = type(tokenizer)(params=tokenizer_path)
-    pad_token_id = get_pad_token_id(tokenizer)
-    vocab_size = get_vocab_size(tokenizer)
+    # Load config saved during training
+    cfg = load_config(model_dir)
 
     # Load data
     label_map = load_labels(labels_json)
@@ -257,12 +250,11 @@ def evaluate_from_checkpoint(
 
     print(f"Evaluating {len(matched_files)} files with {num_classes} classes")
 
-    # Load model
-    model = MidiClassifier(
-        vocab_size=vocab_size,
-        num_classes=num_classes,
-        pad_token_id=pad_token_id,
-        max_seq_len=max_seq_len,
+    # Load MLP model
+    mlp = FeatureMLPRegressor(
+        num_features=cfg.get("num_features", NUM_FEATURES),
+        hidden_dim=cfg.get("hidden_dim", 128),
+        dropout=cfg.get("dropout", 0.3),
     )
     best_model_dir = model_dir / "best_model"
     safetensors_path = best_model_dir / "model.safetensors"
@@ -276,35 +268,21 @@ def evaluate_from_checkpoint(
     else:
         raise FileNotFoundError(f"No model weights found in {best_model_dir}")
 
-    model.load_state_dict(state_dict, strict=False)
+    mlp.load_state_dict(state_dict, strict=False)
+    mlp.eval()
 
-    # Create dataset
-    label_func = make_label_func(label_map)
-    dataset = DatasetMIDI(
-        files_paths=matched_files,
-        tokenizer=tokenizer,
-        max_seq_len=max_seq_len,
-        bos_token_id=tokenizer["BOS_None"],
-        eos_token_id=tokenizer["EOS_None"],
-        func_to_get_labels=label_func,
-    )
+    # Load ensemble
+    mlp_weight = cfg.get("mlp_weight", 0.5)
+    ensemble = EnsembleRegressor.load(model_dir, mlp, mlp_weight=mlp_weight)
 
-    collator = ClassificationCollator(pad_token_id=pad_token_id, max_seq_len=max_seq_len)
+    # Extract and normalise features
+    normalizer_path = model_dir / "feature_normalizer.npz"
+    normalizer = FeatureNormalizer.load(normalizer_path)
+    feats_raw = extract_features_batch(matched_files)
+    feats = normalizer.transform(feats_raw)
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_eval_batch_size=batch_size,
-        report_to="none",
-        remove_unused_columns=False,
-    )
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        data_collator=collator,
-        compute_metrics=build_compute_metrics(),
-    )
-
-    evaluate_on_test(trainer, dataset, matched_labels, num_classes, output_dir)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    evaluate_on_test(ensemble, feats, matched_labels, num_classes, output_dir, device=device)
 
 
 if __name__ == "__main__":
@@ -316,7 +294,6 @@ if __name__ == "__main__":
     parser.add_argument("--midi_dir", type=str, default="mid")
     parser.add_argument("--labels_json", type=str, default="data.json")
     parser.add_argument("--output_dir", type=str, default="./eval_results")
-    parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
 
@@ -325,6 +302,5 @@ if __name__ == "__main__":
         midi_dir=args.midi_dir,
         labels_json=args.labels_json,
         output_dir=args.output_dir,
-        max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
     )

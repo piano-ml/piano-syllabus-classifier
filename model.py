@@ -1,138 +1,126 @@
 """
-model.py — Transformer-based MIDI sequence classifier.
+model.py — Feature-based MLP regressor + LightGBM ensemble for piano grade prediction.
 
 Architecture:
-    Token Embedding + Positional Encoding
-    → N × TransformerEncoderLayer
-    → Mean pooling (masked)
-    → Dropout → Linear → 𝑘 classes
+    Handcrafted features → 3-layer MLP with BatchNorm → single scalar output
+    Handcrafted features → LightGBM regressor → single scalar output
+    Ensemble: weighted average of both predictions.
+    Trained with MAE (L1) loss for direct grade regression.
 """
 
-import math
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding."""
+class FeatureMLPRegressor(nn.Module):
+    """3-layer MLP regressor using handcrafted features.
 
-    def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float)
-            * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, d_model)"""
-        x = x + self.pe[:, : x.size(1)]
-        return self.dropout(x)
-
-
-class MidiClassifier(nn.Module):
-    """Small Transformer encoder for MIDI token sequence classification.
-
-    Compatible with Hugging Face Trainer: forward() accepts ``input_ids``,
-    ``attention_mask``, and ``labels`` and returns a dict with ``loss``
-    and ``logits``.
+    Predicts a continuous grade value (0–8).  Trained with L1 / MAE loss.
+    Compatible with Hugging Face Trainer: forward() accepts ``features``
+    and ``labels`` and returns a dict with ``loss`` and ``logits``.
     """
 
     def __init__(
         self,
-        vocab_size: int,
-        num_classes: int,
-        d_model: int = 256,
-        nhead: int = 8,
-        num_layers: int = 4,
-        dim_feedforward: int = 512,
-        dropout: float = 0.1,
-        max_seq_len: int = 1024,
-        pad_token_id: int = 0,
-        class_weights: torch.Tensor | None = None,
+        num_features: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.3,
     ):
         super().__init__()
-        self.pad_token_id = pad_token_id
-        self.d_model = d_model
-
-        self.embedding = nn.Embedding(
-            vocab_size, d_model, padding_idx=pad_token_id
-        )
-        self.pos_encoder = PositionalEncoding(d_model, max_len=max_seq_len, dropout=dropout)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            activation="gelu",
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
-        )
-
-        self.classifier_head = nn.Sequential(
-            nn.LayerNorm(d_model),
+        self.mlp = nn.Sequential(
+            # Layer 1
+            nn.Linear(num_features, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, num_classes),
+            # Layer 2
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            # Layer 3
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            # Output: single scalar
+            nn.Linear(hidden_dim // 2, 1),
         )
-
-        # Store class weights for weighted cross-entropy
-        if class_weights is not None:
-            self.register_buffer("class_weights", class_weights)
-        else:
-            self.class_weights = None
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        features: torch.Tensor,
         labels: torch.Tensor | None = None,
+        **kwargs,
     ) -> dict[str, torch.Tensor | None]:
-        """
-        Args:
-            input_ids:      (batch, seq_len) — token ids
-            attention_mask:  (batch, seq_len) — 1 for real tokens, 0 for padding
-            labels:          (batch,) — integer class labels
-
-        Returns:
-            dict with 'loss' (scalar or None) and 'logits' (batch, num_classes).
-        """
-        # Build padding mask for nn.TransformerEncoder
-        # TransformerEncoder expects src_key_padding_mask: True = ignore
-        if attention_mask is not None:
-            key_padding_mask = attention_mask == 0  # True where padded
-        else:
-            key_padding_mask = input_ids == self.pad_token_id
-
-        # Embed + positional encoding
-        x = self.embedding(input_ids) * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
-
-        # Transformer encoder
-        x = self.transformer_encoder(x, src_key_padding_mask=key_padding_mask)
-
-        # Mean pooling over non-padded positions
-        if attention_mask is not None:
-            mask_expanded = attention_mask.unsqueeze(-1).float()  # (B, S, 1)
-            x = (x * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
-        else:
-            non_pad = (~key_padding_mask).unsqueeze(-1).float()
-            x = (x * non_pad).sum(dim=1) / non_pad.sum(dim=1).clamp(min=1)
-
-        logits = self.classifier_head(x)  # (batch, num_classes)
-
+        pred = self.mlp(features).squeeze(-1)  # (B,)
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits, labels, weight=self.class_weights)
+            loss = F.l1_loss(pred, labels.float())
+        # HF Trainer expects "logits"; we store the raw prediction there
+        return {"loss": loss, "logits": pred}
 
-        return {"loss": loss, "logits": logits}
+
+class EnsembleRegressor:
+    """Ensemble of MLP + LightGBM regressors with weighted averaging."""
+
+    def __init__(
+        self,
+        mlp: FeatureMLPRegressor,
+        lgbm,
+        mlp_weight: float = 0.5,
+    ):
+        self.mlp = mlp
+        self.lgbm = lgbm
+        self.mlp_weight = mlp_weight
+
+    def predict(self, features_np: np.ndarray, device: str = "cpu") -> np.ndarray:
+        """Predict grade values for a batch of normalised feature vectors.
+
+        Args:
+            features_np: (N, num_features) numpy array, already normalised.
+            device: torch device for the MLP.
+
+        Returns:
+            (N,) numpy array of continuous grade predictions.
+        """
+        # MLP predictions
+        self.mlp.eval()
+        self.mlp.to(device)
+        with torch.no_grad():
+            feat_t = torch.tensor(features_np, dtype=torch.float32, device=device)
+            mlp_pred = self.mlp(features=feat_t)["logits"].cpu().numpy()
+
+        # LightGBM predictions
+        lgbm_pred = self.lgbm.predict(features_np)
+
+        # Weighted average
+        return self.mlp_weight * mlp_pred + (1 - self.mlp_weight) * lgbm_pred
+
+    def save(self, output_dir: str | Path) -> None:
+        """Save the LightGBM model to *output_dir* (MLP saved by HF Trainer)."""
+        import lightgbm as lgb
+
+        path = Path(output_dir) / "lgbm_model.txt"
+        self.lgbm.save_model(str(path))
+        print(f"  LightGBM model saved → {path}")
+
+    @classmethod
+    def load(
+        cls,
+        model_dir: str | Path,
+        mlp: FeatureMLPRegressor,
+        mlp_weight: float = 0.5,
+    ) -> "EnsembleRegressor":
+        """Load LightGBM from disk and pair with an already-loaded MLP."""
+        import lightgbm as lgb
+
+        path = Path(model_dir) / "lgbm_model.txt"
+        if not path.exists():
+            raise FileNotFoundError(f"No LightGBM model found at {path}")
+        lgbm_model = lgb.Booster(model_file=str(path))
+        return cls(mlp, lgbm_model, mlp_weight=mlp_weight)
