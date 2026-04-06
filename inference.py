@@ -113,11 +113,9 @@ def main():
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    print(f"Loading ensemble from {args.model_dir}...")
+    
     ensemble, normalizer, cfg = load_model(model_dir=args.model_dir)
 
-    print(f"Predicting grade for: {args.midi_file}")
     result = predict_grade(
         midi_path=args.midi_file,
         ensemble=ensemble,
@@ -125,7 +123,6 @@ def main():
         device=device,
     )
 
-    print(f"\n{'=' * 50}")
     print(f"{result}")
 
 
