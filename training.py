@@ -10,7 +10,7 @@ import math
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
-from transformers import Trainer, TrainingArguments, TrainerCallback
+from transformers import Trainer, TrainingArguments, TrainerCallback, EarlyStoppingCallback
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -108,7 +108,7 @@ class EvalProgressCallback(TrainerCallback):
 def build_compute_metrics():
     """Return a compute_metrics function for regression.
 
-    Predictions are continuous; we round-and-clamp to [0, 8] for
+    Predictions are continuous; we round-and-clamp to [0, 10] for
     accuracy / classification-style metrics.
     """
 
@@ -123,7 +123,7 @@ def build_compute_metrics():
         mae = float(np.mean(np.abs(preds_raw - labels)))
 
         # Round to nearest integer grade for accuracy / F1
-        preds_int = np.clip(np.round(preds_raw), 0, 8).astype(int)
+        preds_int = np.clip(np.round(preds_raw), 1, 8).astype(int)
         labels_int = np.round(labels).astype(int)
         accuracy = float(np.mean(preds_int == labels_int))
 
@@ -370,10 +370,22 @@ def train(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    hidden_dim = DEFAULT_HPARAMS["hidden_dim"]
+    num_hidden_layers = DEFAULT_HPARAMS["num_hidden_layers"]
+    use_batch_norm = DEFAULT_HPARAMS["use_batch_norm"]
+    activation = DEFAULT_HPARAMS["activation"]
+
+    corn_task_weights = DEFAULT_HPARAMS.get("corn_task_weights")
+
     model = FeatureMLPRegressor(
         num_features=NUM_FEATURES,
-        hidden_dim=128,
+        hidden_dim=hidden_dim,
         dropout=dropout,
+        num_classes=num_classes,
+        num_hidden_layers=num_hidden_layers,
+        use_batch_norm=use_batch_norm,
+        activation=activation,
+        corn_task_weights=corn_task_weights,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -388,13 +400,15 @@ def train(
     print("Step 6: Training")
     print("=" * 60)
 
+    weight_decay = DEFAULT_HPARAMS["weight_decay"]
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size * 2,
         learning_rate=learning_rate,
-        weight_decay=0.01,
+        weight_decay=weight_decay,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -410,19 +424,37 @@ def train(
         remove_unused_columns=False,  # Our model uses custom column names
     )
 
-    # Custom optimizer + CosineAnnealingLR scheduler
+    # Custom optimizer
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=0.01,
+        model.parameters(), lr=learning_rate, weight_decay=weight_decay,
     )
+
+    # Scheduler
+    scheduler_name = DEFAULT_HPARAMS["scheduler"]
     steps_per_epoch = math.ceil(len(train_dataset) / batch_size / gradient_accumulation_steps)
     total_steps = steps_per_epoch * epochs
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps, eta_min=1e-6,
-    )
+
+    if scheduler_name == "reduce_on_plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6,
+        )
+    else:  # "cosine" (default)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps, eta_min=1e-6,
+        )
 
     collator = FeaturesOnlyCollator()
 
     acc_callback = EvalProgressCallback()
+
+    # Early stopping
+    early_stopping_patience = DEFAULT_HPARAMS["early_stopping_patience"]
+    callbacks = [acc_callback]
+    if early_stopping_patience > 0:
+        callbacks.append(EarlyStoppingCallback(
+            early_stopping_patience=early_stopping_patience,
+        ))
+        print(f"  Early stopping enabled (patience={early_stopping_patience}, metric=mae)")
 
     trainer = Trainer(
         model=model,
@@ -431,7 +463,7 @@ def train(
         eval_dataset=val_dataset,
         data_collator=collator,
         compute_metrics=build_compute_metrics(),
-        callbacks=[acc_callback],
+        callbacks=callbacks,
         optimizers=(optimizer, scheduler),
     )
 
@@ -524,12 +556,16 @@ def train(
     save_config({
         "dropout": dropout,
         "num_classes": num_classes,
+        "num_hidden_layers": num_hidden_layers,
+        "use_batch_norm": use_batch_norm,
+        "activation": activation,
         "epochs": epochs,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
         "seed": seed,
         "num_features": NUM_FEATURES,
-        "hidden_dim": 128,
+        "hidden_dim": hidden_dim,
         "mode": "ensemble",
         "mlp_weight": best_w,
     }, output_dir)

@@ -1,12 +1,16 @@
 {
   "dropout": 0.3,
   "num_classes": 9,
-  "epochs": 12,
+  "num_hidden_layers": 2,
+  "use_batch_norm": true,
+  "activation": "relu",
+  "epochs": 100,
   "batch_size": 64,
-  "learning_rate": 0.001,
+  "learning_rate": 0.0005,
+  "weight_decay": 1e-05,
   "seed": 42,
   "num_features": 18,
-  "hidden_dim": 128,
+  "hidden_dim": 64,
   "mode": "ensemble",
-  "mlp_weight": 0.1
+  "mlp_weight": 0.25
 }

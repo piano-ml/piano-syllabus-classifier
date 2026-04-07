@@ -173,7 +173,7 @@ def evaluate_on_test(
     mae = float(np.mean(np.abs(preds_raw - np.array(y_true))))
 
     # Round to nearest integer grade for classification metrics
-    y_pred = np.clip(np.round(preds_raw), 0, num_classes - 1).astype(int).tolist()
+    y_pred = np.clip(np.round(preds_raw), 1, num_classes - 1).astype(int).tolist()
 
     acc = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
@@ -183,9 +183,11 @@ def evaluate_on_test(
     print(f"  Macro F1 (rounded): {f1:.4f}")
 
     # Classification report (on rounded predictions)
-    label_names = [get_label_name(c) for c in range(num_classes)]
+    present_labels = sorted(set(y_true) | set(y_pred))
+    label_names = [get_label_name(c) for c in present_labels]
     report = classification_report(
-        y_true, y_pred, target_names=label_names, digits=3, zero_division=0,
+        y_true, y_pred, labels=present_labels, target_names=label_names,
+        digits=3, zero_division=0,
     )
     print(f"\nClassification Report (rounded predictions):\n{report}")
 
@@ -255,6 +257,10 @@ def evaluate_from_checkpoint(
         num_features=cfg.get("num_features", NUM_FEATURES),
         hidden_dim=cfg.get("hidden_dim", 128),
         dropout=cfg.get("dropout", 0.3),
+        num_classes=cfg.get("num_classes"),
+        num_hidden_layers=cfg.get("num_hidden_layers", 2),
+        use_batch_norm=cfg.get("use_batch_norm", True),
+        activation=cfg.get("activation", "relu"),
     )
     best_model_dir = model_dir / "best_model"
     safetensors_path = best_model_dir / "model.safetensors"
