@@ -200,4 +200,8 @@ Training produces these files in `--output_dir`:
 
 ## Credits
 
-Thanks to Ramoneda, P., Lee, M., Jeong, D., Valero-Mas, J. J., & Serra, X. (2025). Piano Syllabus Dataset [Data set]. Zenodo. https://doi.org/10.5281/zenodo.14794592 for providing very welcome dataset.
+-  https://pianosyllabus.com is a free, community-oriented online database dedicated to piano music, with pieces graded by difficulty. It currently lists over 27,000 entries from more than 2,000 composers, serving as a searchable tool for pianists, teachers, and students to explore repertoire across various difficulty levels (typically grades 0–10, plus diploma levels). 
+
+
+
+-  Ramoneda, P., Lee, M., Jeong, D., Valero-Mas, J. J., & Serra, X. (2025). Piano Syllabus Dataset [Data set]. Zenodo. https://doi.org/10.5281/zenodo.14794592 for providing very welcome dataset.

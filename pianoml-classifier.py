@@ -1,4 +1,24 @@
 """
+
+-------------------------------------------------------------------------------
+Need to assign a grade to a piano score?
+There’s a new tool for that!And no — it’s not an AI. 
+The system works by first manually identifying a comprehensive set of musical and technical features, including:
+note density, average polyphony, maximum polyphony, polyphony entropy, pitch range, number of distinct pitches, average velocity, standard deviation of velocity, dynamic range, chord ratio, fast-note ratio, rhythmic complexity, wide-leap ratio, repeated-note ratio, arpeggio ratio, low-register ratio, high-register ratio, and hand independence.
+These features are then quantified, normalized, and compared against a large university-derived reference database built from the graded repertoire on piano-syllabus.com.
+
+The program is completely free and open-source, with the code available on GitHub.
+
+However, because the setup can be a bit technical, we’ve also made it simple and accessible for everyone.
+
+Just visit https://pianoml.org: upload your score (in PDF, MIDI, or MusicXML format), and within moments you’ll receive its estimated grade.
+
+About PianoML:
+https://pianoml.org: is an open-source web application designed to help pianists begin their journey and learn effectively through practice. 
+It also serves as a powerful personal library containing more than 12,000 piano scores.
+
+-------------------------------------------------------------------------------
+
 pianoml-classifier.py — Batch-classify ungraded scores on PianoML.
 
 Searches for scores with no grade, downloads their MIDI, runs the
@@ -70,6 +90,8 @@ def update_score_grade(session: requests.Session, score: dict, grade: int) -> bo
     """PUT the score with the new grade."""
     score_id = score["id"]
     payload = dict(score)
+    if "harmony" in payload:
+        del payload["harmony"] # API doesn't accept this field in the update
     payload["grade"] = grade
     resp = session.put(
         f"{API_BASE_URL}/score/{score_id}/info",
@@ -139,12 +161,13 @@ def main():
                     tmp_path = Path(tmp.name)
 
                 result = predict_grade(tmp_path, ensemble, normalizer, device=device)
-                grade = round(result["predicted_value"])
+                grade = result["predicted_value"]
                 print(f"  → grade={grade} (valeur={result['predicted_value']}, label={result['predicted_grade']})")
 
                 if update_score_grade(session, score, grade):
                     updated += 1
                     print(f"  ✓ Mis à jour")
+                    sys.exit(0)
                 else:
                     errors += 1
                     skipped_ids.add(score_id)
