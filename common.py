@@ -17,15 +17,27 @@ from miditok import REMI, TokenizerConfig
 
 DEFAULT_HPARAMS = {
     # MLP architecture
-    "hidden_dim": 128,
+    "hidden_dim": 64,
+    "num_hidden_layers": 2,
+    "use_batch_norm": True,
+    "activation": "relu",
     "dropout": 0.3,
     # Training
-    "lr": 1e-3,
+    "lr": 5e-4,
     "batch_size": 64,
-    "epochs": 12,
+    "epochs": 100,
     "seed": 42,
-    "weight_decay": 0.01,
+    "optimizer": "adamw",
+    "weight_decay": 1e-5,
     "warmup_ratio": 0.1,
+    # CORN task weights (one per threshold k=0..K-2, length = num_classes - 1)
+    # Inverse-frequency of task sample counts (mean-normalised to 1.0)
+    # Task k trains on samples with y>=k; higher k → fewer samples → higher weight
+    #"corn_task_weights": [0.7477, 0.7477, 0.8325, 0.9079, 1.0337, 1.201, 1.4652, 1.8519],,
+    "corn_task_weights":  [0.85, 0.85, 0.92, 0.98, 1.05, 1.18, 1.35, 1.62],
+    # Scheduler & stopping
+    "scheduler": "cosine",
+    "early_stopping_patience": 20,
     # Performance
     "dataloader_num_workers": 4,
     "gradient_accumulation_steps": 1,
@@ -61,12 +73,11 @@ def load_config(model_dir: str | Path) -> dict:
 
 # ---------------------------------------------------------------------------
 # Label mapping: ps value → integer class id
-# Piano Syllabus levels: 0 (Initial), 1–8 (Grade 1–8)
-# Grades 9 and 10 are merged into Grade 8 (unreliable distinction)
+# Piano Syllabus levels: 1–8 (Grade 1–8)
+# Initial/0 and 1 are clamped to 1; 8 and above are clamped to 8.
 # ---------------------------------------------------------------------------
 
 LABEL_NAMES = {
-    0: "Initial",
     1: "Grade 1",
     2: "Grade 2",
     3: "Grade 3",
@@ -83,7 +94,6 @@ def parse_ps_label(ps_value: str) -> int:
 
     Handles numeric strings ("1", "7"), the word "Initial" (→ 0),
     and grade strings like "Grade 3" (→ 3).
-    Grades 9 and 10 are clamped to 8 (unreliable distinction at that level).
     """
     if ps_value is None:
         raise ValueError("ps value is None")
@@ -106,9 +116,9 @@ def parse_ps_label(ps_value: str) -> int:
     if label is None:
         raise ValueError(f"Cannot parse ps value: {ps_value!r}")
 
-    # Merge grades 9 and 10 into grade 8
-    if label > 8:
-        label = 8
+    # Clamp: Initial/0 and 1 → 1, 8 and above → 8
+    label = max(label, 1)
+    label = min(label, 8)
 
     return label
 

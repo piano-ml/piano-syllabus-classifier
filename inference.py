@@ -36,6 +36,10 @@ def load_model(
         num_features=cfg.get("num_features", NUM_FEATURES),
         hidden_dim=cfg.get("hidden_dim", 128),
         dropout=cfg.get("dropout", 0.3),
+        num_classes=cfg.get("num_classes"),
+        num_hidden_layers=cfg.get("num_hidden_layers", 2),
+        use_batch_norm=cfg.get("use_batch_norm", True),
+        activation=cfg.get("activation", "relu"),
     )
 
     # Load weights — try safetensors first, then pytorch
@@ -77,7 +81,7 @@ def predict_grade(
 
     Returns a dict with:
         - predicted_value: float  (continuous ensemble output)
-        - predicted_label: int    (rounded & clamped to 0-8)
+        - predicted_label: int    (rounded & clamped to 0-10)
         - predicted_grade: str    (human-readable)
     """
     midi_path = Path(midi_path)
@@ -90,7 +94,7 @@ def predict_grade(
 
     # Ensemble prediction
     pred_value = float(ensemble.predict(feats, device=device)[0])
-    pred_label = int(np.clip(round(pred_value), 0, 8))
+    pred_label = int(np.clip(round(pred_value), 1, 8))
 
     return {
         "file": str(midi_path),
